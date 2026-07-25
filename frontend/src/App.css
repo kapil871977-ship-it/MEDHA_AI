@@ -1,0 +1,819 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Cormorant+Garamond:wght@400;500;700&display=swap');
+
+* {
+  font-family: Calibri, 'Segoe UI', Arial, sans-serif !important;
+}
+
+:root {
+  --cosmos-ink: #dbeafe;
+  --cosmos-muted: #b8c3f8;
+  --cosmos-line: rgba(159, 187, 255, 0.32);
+  --cosmos-glass: rgba(7, 16, 44, 0.58);
+  --cosmos-glow: rgba(82, 201, 255, 0.34);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  color: var(--cosmos-ink);
+  background:
+    radial-gradient(circle at 18% 16%, rgba(251, 191, 36, 0.24) 0%, rgba(251, 191, 36, 0) 42%),
+    radial-gradient(circle at 82% 14%, rgba(239, 68, 68, 0.16) 0%, rgba(239, 68, 68, 0) 40%),
+    radial-gradient(circle at 50% 86%, rgba(41, 29, 11, 0.9) 0%, rgba(14, 10, 5, 1) 64%),
+    linear-gradient(170deg, #0f0b07, #120d08 40%, #17110a);
+  animation: cosmicGradientShift 20s ease-in-out infinite alternate;
+  background-attachment: fixed;
+}
+
+body::before,
+body::after {
+  display: none;
+}
+
+body::before {
+  background-image:
+    linear-gradient(63deg, rgba(125, 211, 252, 0.12) 1px, transparent 1px),
+    linear-gradient(117deg, rgba(165, 180, 252, 0.1) 1px, transparent 1px),
+    radial-gradient(circle at 16% 26%, rgba(255, 255, 255, 0.9) 0 1px, transparent 2px),
+    radial-gradient(circle at 40% 62%, rgba(186, 230, 253, 0.8) 0 1px, transparent 2px),
+    radial-gradient(circle at 77% 34%, rgba(199, 210, 254, 0.85) 0 1px, transparent 2px),
+    radial-gradient(circle at 61% 79%, rgba(255, 255, 255, 0.75) 0 1px, transparent 2px);
+  background-size: 260px 260px, 240px 240px, auto, auto, auto, auto;
+  opacity: 0.6;
+  animation: twinkleDrift 18s linear infinite, auroraSweep 34s ease-in-out infinite;
+}
+
+body::after {
+  background:
+    conic-gradient(from 90deg at 50% 50%, rgba(45, 212, 191, 0.12), rgba(59, 130, 246, 0.08), rgba(251, 191, 36, 0.1), rgba(45, 212, 191, 0.12)),
+    radial-gradient(circle at 20% 72%, rgba(245, 158, 11, 0.16), transparent 26%),
+    radial-gradient(circle at 75% 74%, rgba(239, 68, 68, 0.14), transparent 28%),
+    radial-gradient(circle at 12% 22%, rgba(251, 191, 36, 0.92) 0 20px, rgba(251, 191, 36, 0.26) 22px, transparent 42px),
+    radial-gradient(circle at 84% 26%, rgba(56, 189, 248, 0.9) 0 14px, rgba(56, 189, 248, 0.24) 16px, transparent 34px),
+    radial-gradient(circle at 72% 72%, rgba(129, 140, 248, 0.9) 0 18px, rgba(129, 140, 248, 0.24) 20px, transparent 38px),
+    radial-gradient(circle at 15% 88%, rgba(99, 102, 241, 0.26), transparent 34%),
+    radial-gradient(circle at 85% 90%, rgba(14, 165, 233, 0.24), transparent 32%);
+  filter: blur(4px) saturate(1.05);
+  animation: nebulaPulse 8s ease-in-out infinite alternate, auroraSweep 28s linear infinite;
+}
+
+@keyframes cosmicGradientShift {
+  0% { background-position: 0% 0%, 100% 0%, 50% 100%, 0 0; }
+  50% { background-position: 40% 20%, 70% 25%, 45% 65%, 0 0; }
+  100% { background-position: 100% 40%, 30% 55%, 55% 20%, 0 0; }
+}
+
+@keyframes twinkleDrift {
+  0% { transform: translateY(0px); opacity: 0.4; }
+  50% { transform: translateY(-6px); opacity: 0.82; }
+  100% { transform: translateY(0px); opacity: 0.45; }
+}
+
+@keyframes nebulaPulse {
+  0% { opacity: 0.35; transform: scale(1); }
+  100% { opacity: 0.75; transform: scale(1.04); }
+}
+
+@keyframes auroraSweep {
+  0% { transform: translate3d(-1%, 0, 0) rotate(0deg); }
+  50% { transform: translate3d(1%, -1%, 0) rotate(2deg); }
+  100% { transform: translate3d(-1%, 1%, 0) rotate(0deg); }
+}
+
+@keyframes cosmicRise {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes auraFlow {
+  0% { box-shadow: 0 0 0 rgba(82, 201, 255, 0); }
+  50% { box-shadow: 0 0 24px rgba(82, 201, 255, 0.18); }
+  100% { box-shadow: 0 0 0 rgba(82, 201, 255, 0); }
+}
+
+@keyframes logoOrbitSpin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes logoOrbitSpinReverse {
+  from { transform: translate(-50%, -50%) rotate(360deg); }
+  to { transform: translate(-50%, -50%) rotate(0deg); }
+}
+
+@keyframes logoCorePulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 rgba(56, 189, 248, 0.1); }
+  50% { transform: scale(1.06); box-shadow: 0 0 22px rgba(56, 189, 248, 0.5); }
+  100% { transform: scale(1); box-shadow: 0 0 0 rgba(56, 189, 248, 0.1); }
+}
+
+@keyframes textGlowShift {
+  0% { text-shadow: 0 0 8px rgba(125, 211, 252, 0.25); }
+  50% { text-shadow: 0 0 18px rgba(125, 211, 252, 0.52); }
+  100% { text-shadow: 0 0 8px rgba(125, 211, 252, 0.25); }
+}
+
+@keyframes fortuneTitleShimmer {
+  0% { background-position: 0% center; }
+  100% { background-position: 220% center; }
+}
+
+@keyframes fortuneTitlePulse {
+  0% { transform: translateY(0px) scale(1); }
+  50% { transform: translateY(-2px) scale(1.015); }
+  100% { transform: translateY(0px) scale(1); }
+}
+
+@keyframes logoFloat {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes contactMarquee {
+  0% { transform: translateX(100%); opacity: 0.86; }
+  100% { transform: translateX(-100%); opacity: 1; }
+}
+
+.medha-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 10px;
+  max-width: 100%;
+  padding: 0 8px;
+  user-select: none;
+  animation: logoFloat 4s ease-in-out infinite;
+}
+
+.medha-logo.compact {
+  transform: scale(0.9);
+  margin-bottom: 4px;
+}
+
+.medha-logo-mark {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.medha-logo-core {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Cinzel', serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  color: #e0f2fe;
+  background: radial-gradient(circle at 30% 30%, rgba(56, 189, 248, 0.95), rgba(30, 64, 175, 0.86));
+  border: 1px solid rgba(191, 219, 254, 0.7);
+  animation: logoCorePulse 3.4s ease-in-out infinite;
+}
+
+.medha-logo-spark {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  font-size: 12px;
+  color: #fde68a;
+  text-shadow: 0 0 10px rgba(253, 230, 138, 0.8);
+  animation: guruStarTwinkle 2.2s ease-in-out infinite;
+}
+
+.medha-logo-text-wrap {
+  line-height: 1.05;
+  overflow: visible;
+}
+
+.medha-logo-title {
+  margin: 0;
+  font-family: 'Cinzel', serif;
+  font-size: clamp(20px, 3.2vw, 30px);
+  letter-spacing: 1px;
+  white-space: nowrap;
+  color: #e0e7ff;
+  animation: textGlowShift 4s ease-in-out infinite;
+}
+
+.medha-logo-subtitle {
+  margin: 4px 0 0;
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  letter-spacing: 3.4px;
+  color: #a5f3fc;
+}
+
+.logo-variant-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(147, 197, 253, 0.35);
+  background: transparent;
+  margin-bottom: 8px;
+}
+
+.logo-variant-btn {
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  background: transparent;
+  color: #cbd5e1;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.logo-variant-btn.active {
+  color: #e0f2fe;
+  border-color: rgba(125, 211, 252, 0.75);
+  box-shadow: 0 0 16px rgba(2, 6, 23, 0.26);
+}
+
+.medha-logo.royal .medha-logo-core {
+  background: radial-gradient(circle at 30% 30%, rgba(56, 189, 248, 0.95), rgba(30, 64, 175, 0.86));
+  border-color: rgba(191, 219, 254, 0.7);
+}
+
+.medha-logo.minimal .medha-logo-core {
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.85);
+  color: #e2e8f0;
+  box-shadow: none;
+}
+
+.medha-logo.minimal .medha-logo-spark {
+  color: #cbd5e1;
+  text-shadow: none;
+}
+
+.medha-logo.minimal .medha-logo-title {
+  color: #dbeafe;
+  text-shadow: none;
+}
+
+.medha-logo.minimal .medha-logo-subtitle {
+  color: #cbd5e1;
+}
+
+.medha-logo.temple .medha-logo-core {
+  background: radial-gradient(circle at 30% 30%, rgba(251, 191, 36, 0.95), rgba(180, 83, 9, 0.92));
+  border: 1px solid rgba(254, 215, 170, 0.92);
+  color: #fff7ed;
+}
+
+.medha-logo.temple .medha-logo-spark {
+  color: #fde68a;
+  text-shadow: 0 0 12px rgba(251, 191, 36, 0.82);
+}
+
+.medha-logo.temple .medha-logo-title {
+  color: #fef3c7;
+  text-shadow: 0 0 18px rgba(251, 191, 36, 0.4);
+}
+
+.medha-logo.temple .medha-logo-subtitle {
+  color: #fdba74;
+}
+
+.contact-line-animated {
+  display: inline-flex;
+  align-items: center;
+  animation: contactMarquee 36s linear infinite;
+  will-change: transform;
+}
+
+.contact-line-animated:hover {
+  animation-play-state: paused;
+}
+
+.sanatan-aura-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 0;
+}
+
+.sanatan-symbol {
+  position: absolute;
+  opacity: 0.16;
+  filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.25));
+  animation: sanatanFloat 14s ease-in-out infinite;
+}
+
+.symbol-om {
+  left: 4%;
+  top: 12%;
+  font-size: 74px;
+  color: #f59e0b;
+}
+
+.symbol-swastik {
+  right: 7%;
+  top: 20%;
+  font-size: 62px;
+  color: #ef4444;
+  animation-delay: 2s;
+}
+
+.symbol-trishul {
+  left: 9%;
+  bottom: 16%;
+  font-size: 58px;
+  color: #22c55e;
+  animation-delay: 4s;
+}
+
+.symbol-diya {
+  right: 11%;
+  bottom: 20%;
+  font-size: 52px;
+  color: #f97316;
+  animation-delay: 1s;
+}
+
+.symbol-lotus {
+  left: 46%;
+  top: 9%;
+  font-size: 46px;
+  color: #fbbf24;
+  animation-delay: 3s;
+}
+
+.symbol-kalash {
+  left: 48%;
+  bottom: 12%;
+  font-size: 42px;
+  color: #34d399;
+  animation-delay: 5s;
+}
+
+@keyframes sanatanFloat {
+  0% { transform: translateY(0px) scale(1); opacity: 0.12; }
+  50% { transform: translateY(-12px) scale(1.06); opacity: 0.24; }
+  100% { transform: translateY(0px) scale(1); opacity: 0.12; }
+}
+
+.fortune-line-wrap {
+  margin: 10px auto 0;
+  max-width: 920px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: none;
+  background: transparent;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.3);
+}
+
+.fortune-line-wrap.compact {
+  max-width: 640px;
+  padding: 10px 14px;
+}
+
+.fortune-line-label {
+  flex: 0 0 auto;
+  font-family: 'Cinzel', serif;
+  font-size: 13px;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  text-align: center;
+  color: #fff7ed;
+  border: none;
+  border-radius: 999px;
+  padding: 5px 12px;
+  background: rgba(15, 23, 42, 0.35);
+  box-shadow: none;
+}
+
+.fortune-line-text {
+  margin: 0;
+  color: #f8fafc;
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1.45;
+  text-align: center;
+  text-shadow: 0 0 8px rgba(186, 230, 253, 0.4);
+  animation: fortuneLineFade 0.5s ease;
+}
+
+@keyframes fortuneLineFade {
+  from { opacity: 0.1; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 768px) {
+  .guru-floating-badge {
+    top: 10px;
+    right: 10px;
+    width: 52px;
+    height: 52px;
+  }
+
+  .sanatan-symbol {
+    opacity: 0.1;
+    filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.2));
+  }
+
+  .symbol-om,
+  .symbol-swastik,
+  .symbol-trishul,
+  .symbol-diya {
+    font-size: 34px;
+  }
+
+  .symbol-lotus,
+  .symbol-kalash {
+    font-size: 28px;
+  }
+
+  .fortune-line-wrap {
+    align-items: center;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .fortune-line-text {
+    font-size: 14px;
+  }
+}
+
+@keyframes guruFloat {
+  0% { transform: translateY(0px) scale(1); }
+  50% { transform: translateY(-8px) scale(1.01); }
+  100% { transform: translateY(0px) scale(1); }
+}
+
+@keyframes guruAuraPulse {
+  0% { box-shadow: 0 0 0 rgba(56, 189, 248, 0.2), 0 0 0 rgba(129, 140, 248, 0.18); }
+  50% { box-shadow: 0 0 30px rgba(56, 189, 248, 0.34), 0 0 56px rgba(129, 140, 248, 0.24); }
+  100% { box-shadow: 0 0 0 rgba(56, 189, 248, 0.2), 0 0 0 rgba(129, 140, 248, 0.18); }
+}
+
+@keyframes guruOrbit {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+@keyframes guruOrbitReverse {
+  from { transform: translate(-50%, -50%) rotate(360deg); }
+  to { transform: translate(-50%, -50%) rotate(0deg); }
+}
+
+@keyframes guruStarTwinkle {
+  0% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.15); }
+  100% { opacity: 0.35; transform: scale(0.8); }
+}
+
+.guru-cosmic-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 10px;
+  animation: guruFloat 4.6s ease-in-out infinite;
+}
+
+.guru-cosmic-wrap.compact {
+  transform: scale(0.92);
+}
+
+.guru-cosmic-frame {
+  position: relative;
+  width: 128px;
+  height: 128px;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  overflow: visible;
+  animation: none;
+}
+
+.guru-cosmic-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  display: block;
+  mix-blend-mode: normal;
+  filter: saturate(1.08) contrast(1.04) brightness(1.03);
+}
+
+.guru-orbit,
+.guru-star {
+  display: none;
+}
+
+.guru-orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.guru-orbit-a {
+  width: 148px;
+  height: 148px;
+  border: 1.6px solid rgba(74, 222, 128, 0.82);
+  border-right-color: rgba(74, 222, 128, 0.16);
+  transform: translate(-50%, -50%);
+  animation: guruOrbit 7s linear infinite;
+}
+
+.guru-orbit-b {
+  width: 170px;
+  height: 170px;
+  border: 1px dashed rgba(248, 113, 113, 0.86);
+  border-left-color: rgba(248, 113, 113, 0.2);
+  transform: translate(-50%, -50%);
+  animation: guruOrbitReverse 11s linear infinite;
+}
+
+.guru-star {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  box-shadow: 0 0 10px rgba(224, 242, 254, 0.9);
+  animation: guruStarTwinkle 2.4s ease-in-out infinite;
+}
+
+.guru-star-a {
+  left: -2px;
+  top: 20px;
+}
+
+.guru-star-b {
+  right: -4px;
+  top: 52px;
+  animation-delay: 0.8s;
+}
+
+.guru-star-c {
+  left: 22px;
+  bottom: -3px;
+  animation-delay: 1.4s;
+}
+
+.guru-cosmic-caption {
+  margin: 0;
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  letter-spacing: 1.8px;
+  color: #bfdbfe;
+  text-transform: uppercase;
+  text-shadow: 0 0 14px rgba(125, 211, 252, 0.45);
+}
+
+.guru-floating-badge {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  width: 64px;
+  height: 64px;
+  border-radius: 999px;
+  z-index: 999;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(2, 6, 23, 0.4);
+  box-shadow: 0 8px 18px rgba(2, 6, 23, 0.45);
+}
+
+.guru-floating-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 14%;
+  display: block;
+  filter: contrast(1.05) saturate(1.04);
+}
+
+/* ── LOGIN PAGE DEITY LAYOUT ── */
+.login-deity-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 18px;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 12px 0;
+  position: relative;
+  z-index: 2;
+}
+
+.login-deity-panel {
+  flex: 0 0 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 40px;
+}
+
+.login-deity-img {
+  max-width: 190px;
+  max-height: 280px;
+  object-fit: contain;
+  border-radius: 18px;
+  filter: drop-shadow(0 0 22px rgba(251, 191, 36, 0.35));
+  animation: deityGlow 4s ease-in-out infinite alternate;
+}
+
+@keyframes deityGlow {
+  0% { filter: drop-shadow(0 0 14px rgba(251, 191, 36, 0.25)); }
+  100% { filter: drop-shadow(0 0 30px rgba(251, 191, 36, 0.55)); }
+}
+
+.login-center-col {
+  flex: 1;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.login-guru-avatar-wrap {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.login-guru-avatar-crop {
+  width: 170px;
+  height: 160px;
+  overflow: hidden;
+  border-radius: 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  margin-bottom: 1px;
+}
+
+.login-guru-avatar-wrap::before {
+  content: none;
+}
+
+.login-guru-avatar-wrap::after {
+  content: '';
+  position: absolute;
+  top: -14px;
+  left: 50%;
+  width: 120px;
+  height: 120px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0.14) 36%, rgba(255, 255, 255, 0) 72%);
+  z-index: 0;
+  animation: haloPulse 2.8s ease-in-out infinite;
+}
+
+.login-guru-avatar {
+  width: 170px;
+  height: 220px;
+  display: block;
+  border-radius: 14px;
+  object-fit: cover;
+  object-position: center 14%;
+  clip-path: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  image-rendering: auto;
+  filter: contrast(1.08) saturate(1.04) brightness(1.04);
+  box-shadow: 0 10px 26px rgba(2, 6, 23, 0.42);
+  animation: guruAvatarPulse 3s ease-in-out infinite alternate;
+  margin-bottom: 0;
+  position: relative;
+  z-index: 2;
+}
+
+@keyframes haloRotate {
+  from { transform: translateX(-50%) rotate(0deg); }
+  to { transform: translateX(-50%) rotate(360deg); }
+}
+
+@keyframes haloPulse {
+  0% { opacity: 0.55; transform: translateX(-50%) scale(0.96); }
+  50% { opacity: 0.95; transform: translateX(-50%) scale(1.06); }
+  100% { opacity: 0.55; transform: translateX(-50%) scale(0.96); }
+}
+
+@keyframes guruAvatarPulse {
+  0% { box-shadow: 0 10px 20px rgba(2, 6, 23, 0.32); }
+  100% { box-shadow: 0 14px 34px rgba(2, 6, 23, 0.5); }
+}
+
+.login-guru-label {
+  margin: 0;
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  letter-spacing: 0.8px;
+  line-height: 1.2;
+  text-align: center;
+  max-width: 360px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #fef3c7;
+  text-shadow: 0 0 8px rgba(251, 191, 36, 0.35);
+  font-weight: 700;
+  transform: none;
+}
+
+.login-tagline {
+  margin: 4px 0 0;
+  font-size: 16px;
+  letter-spacing: 1px;
+  color: #fde68a;
+  font-style: italic;
+  font-weight: 600;
+  text-shadow: 0 0 14px rgba(251, 191, 36, 0.4);
+}
+
+.login-jagdacharya-strip {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: linear-gradient(90deg, #7c2d12, #991b1b, #854d0e, #7c2d12);
+  border-top: 2px solid rgba(251, 191, 36, 0.7);
+  padding: 8px 0;
+  color: #fef3c7;
+  font-family: 'Cinzel', serif;
+  font-size: 14px;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  text-shadow: 0 0 10px rgba(251, 191, 36, 0.4);
+}
+
+@media (max-width: 768px) {
+  .login-deity-row {
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  .login-deity-panel {
+    flex: 0 0 auto;
+    padding-top: 0;
+  }
+  .login-deity-img {
+    max-width: 120px;
+    max-height: 160px;
+  }
+  .login-deity-left { order: 1; }
+  .login-center-col { order: 2; }
+  .login-deity-right { order: 3; }
+  .login-guru-avatar-crop {
+    width: 132px;
+    height: 124px;
+  }
+
+  .login-guru-avatar {
+    width: 132px;
+    height: 172px;
+    margin-bottom: 0;
+  }
+
+  .login-guru-label {
+    max-width: 92vw;
+    white-space: normal;
+  }
+}
+

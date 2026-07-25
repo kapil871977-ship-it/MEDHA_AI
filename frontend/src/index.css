@@ -1,0 +1,11 @@
+body {
+  margin: 0;
+  font-family: 'Cormorant Garamond', 'Georgia', serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: 0.2px;
+}
+
+code {
+  font-family: 'Consolas', 'Courier New', monospace;
+}

@@ -1,0 +1,139 @@
+{
+  "meta": {
+    "version": "4.0",
+    "modules": ["market_prediction", "market_past", "investment_advice"],
+    "principle": "multi-layer confluence only"
+  },
+  "market_prediction": {
+    "future_logic": {
+      "trend": [
+        {
+          "condition": "jupiter_transit_supports_2_5_11",
+          "signal": "BULLISH",
+          "weight": 0.8
+        },
+        {
+          "condition": "saturn_transit_afflicts_2_11 OR saturn_8_12_from_moon",
+          "signal": "BEARISH",
+          "weight": -0.8
+        }
+      ],
+      "trigger": [
+        {
+          "condition": "kp_sublord_connected_2_5_11",
+          "signal": "BUY",
+          "confidence": 0.9
+        },
+        {
+          "condition": "kp_sublord_connected_6_8_12",
+          "signal": "SELL",
+          "confidence": 0.9
+        }
+      ],
+      "intraday": [
+        {
+          "condition": "moon_in_11 AND mercury_strong",
+          "signal": "UP",
+          "weight": 0.6
+        },
+        {
+          "condition": "moon_afflicted_saturn_rahu",
+          "signal": "DOWN",
+          "weight": -0.6
+        }
+      ],
+      "final_rule": "if trend + trigger + intraday aligned then STRONG_SIGNAL else NO_TRADE"
+    }
+  },
+  "market_past": {
+    "logic": [
+      {
+        "condition": "jupiter_period AND 2_11_active",
+        "result": "historical_bull_phase"
+      },
+      {
+        "condition": "saturn_period AND 8_12_active",
+        "result": "historical_bear_phase"
+      },
+      {
+        "condition": "rahu_period",
+        "result": "high_volatility_phase"
+      }
+    ],
+    "output": "show_chart_with_labels_bull_bear_volatility"
+  },
+  "investment_advice": {
+    "janma_kundli": [
+      {
+        "condition": "strong_2nd_11th_lords",
+        "result": "wealth_capability_high"
+      },
+      {
+        "condition": "5th_house_strong AND mercury_strong",
+        "result": "trading_capability_high"
+      },
+      {
+        "condition": "8th_house_rahu",
+        "result": "risk_high_sudden_gain_loss"
+      }
+    ],
+    "gochar": [
+      {
+        "condition": "jupiter_transit_over_2_11",
+        "result": "investment_growth_period"
+      },
+      {
+        "condition": "saturn_afflicts_2_11",
+        "result": "capital_protection_needed"
+      }
+    ],
+    "commodity_mapping": [
+      {
+        "planet": "SUN",
+        "commodity": ["gold", "government_bonds"],
+        "nature": "stable"
+      },
+      {
+        "planet": "MOON",
+        "commodity": ["silver", "liquid_cash"],
+        "nature": "fast_moving"
+      },
+      {
+        "planet": "MARS",
+        "commodity": ["metals", "real_estate"],
+        "nature": "aggressive"
+      },
+      {
+        "planet": "MERCURY",
+        "commodity": ["stocks", "trading"],
+        "nature": "volatile"
+      },
+      {
+        "planet": "JUPITER",
+        "commodity": ["long_term_investment", "gold"],
+        "nature": "growth"
+      },
+      {
+        "planet": "VENUS",
+        "commodity": ["luxury", "cosmetics", "silver"],
+        "nature": "comfort"
+      },
+      {
+        "planet": "SATURN",
+        "commodity": ["oil", "iron", "infrastructure"],
+        "nature": "slow_heavy"
+      },
+      {
+        "planet": "RAHU",
+        "commodity": ["crypto", "speculation"],
+        "nature": "extreme"
+      },
+      {
+        "planet": "KETU",
+        "commodity": ["spiritual_assets", "detachment"],
+        "nature": "non_material"
+      }
+    ],
+    "final_logic": "combine janma_strength + current_transit -> suggest invest_or_avoid with sector"
+  }
+}

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-dotenv
+google-generativeai
+openai
+pyswisseph==2.10.3.2
+timezonefinder==8.2.1
+httpx
