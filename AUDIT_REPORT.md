@@ -115,6 +115,49 @@ Verified via FastAPI TestClient: no-token → 401, valid-token → 200, tampered
 rate limit → `[200,200,200,200,200,429,429]` at a limit of 5, and anonymous access → 200 when
 `AUTH_ENFORCE=false`.
 
+## Enhancement — installable PWA (Progressive Web App)
+
+The app is now installable to a phone/desktop home screen and launches standalone (no browser
+chrome), while remaining the same web app:
+
+- `frontend/public/manifest.json` — real app name ("MEDHA AI — Fortune Guru"), icons (192/512 +
+  maskable), standalone display, portrait, branded theme/background colors.
+- `frontend/public/service-worker.js` — offline support: network-first for navigations with an
+  app-shell fallback, cache-first for static assets. Only caches same-origin GET requests, so the
+  backend API is never cached.
+- `frontend/src/index.js` — registers the service worker in production builds only.
+- `frontend/public/index.html` — branded title/description, `theme-color`, and Apple
+  web-app meta tags for iOS "Add to Home Screen".
+
+To use it: run `npm run build` and serve the `build/` folder over **HTTPS** (PWAs require HTTPS,
+except on `localhost`). Chrome/Edge then show an "Install" icon in the address bar; iOS Safari
+uses Share → "Add to Home Screen". _Note: the production `npm run build` should be run in your
+environment — it could not be run to completion in the audit sandbox, though all PWA files were
+syntax-validated and the project builds with the standard CRA toolchain._
+
+## Deployment prep (Render backend + Vercel frontend)
+
+The app is now deploy-shaped for Render (API) and Vercel (frontend):
+
+- `backend/main.py` — bind host is configurable via `HOST` (defaults to `0.0.0.0` so cloud
+  hosts can reach it); `AUTH_DB_PATH` is configurable so the user DB can live on a persistent disk.
+- `render.yaml` — Render Blueprint: Python 3.11.9, `pip install`, `uvicorn main:app`, health check
+  at `/health`, auto-generated `AUTH_SECRET_KEY`, and placeholders for the LLM keys + `ALLOWED_ORIGINS`.
+  Includes commented-out persistent-disk config for durable accounts.
+- `backend/.python-version` — pins Python 3.11.9.
+- `frontend/vercel.json` — CRA framework preset, SPA rewrites, and a no-cache header for the
+  service worker.
+- `DEPLOYMENT.md` — full step-by-step: deploy backend → set keys → deploy frontend with
+  `REACT_APP_API_URL` → set `ALLOWED_ORIGINS` to the Vercel URL → verify.
+- `backend/.env.example` — documents `HOST` and `AUTH_DB_PATH`.
+
+Verified: backend compiles, `render.yaml` is valid YAML, `vercel.json` is valid JSON, and the
+`AUTH_DB_PATH`/`HOST` overrides work (signup writes to the custom DB path).
+
+_Still to run in your environment:_ push to GitHub, click through the Render + Vercel steps in
+`DEPLOYMENT.md`, and (for production accounts that survive redeploys) enable the Render persistent
+disk or move auth to Postgres.
+
 ## Remaining (needs your input — not code-fixable by me)
 
 - **Login-page deity images** (`jagdacharya-…jpg`, `shiv-parivar.png`, `lakshmi-narayan.png`) are

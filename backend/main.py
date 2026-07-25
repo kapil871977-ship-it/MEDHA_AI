@@ -1105,7 +1105,7 @@ AUTH_SECRET = os.getenv("AUTH_SECRET_KEY", "").strip() or secrets.token_hex(32)
 if not os.getenv("AUTH_SECRET_KEY", "").strip():
     print("WARNING: AUTH_SECRET_KEY not set — using a random per-process secret. "
           "Set AUTH_SECRET_KEY in backend/.env to keep users logged in across restarts.")
-AUTH_DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+AUTH_DB_PATH = os.getenv("AUTH_DB_PATH", "").strip() or os.path.join(os.path.dirname(__file__), "users.db")
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", str(30 * 24 * 3600)))
 _PBKDF2_ITERATIONS = 200_000
 
@@ -3597,6 +3597,9 @@ CRITICAL: Return ONLY valid JSON. No markdown. No code fences."""
 
 
 if __name__ == "__main__":
+    # HOST defaults to 0.0.0.0 so the app is reachable inside containers /
+    # cloud hosts (Render sets $PORT). For local-only use, set HOST=127.0.0.1.
+    host = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
     port = int(os.getenv("PORT", "8010"))
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host=host, port=port)
 

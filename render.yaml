@@ -1,0 +1,46 @@
+# Render Blueprint — MEDHA AI backend (FastAPI).
+# Deploy: push this repo to GitHub, then in Render → New → Blueprint → pick the repo.
+# Render reads this file and creates the service. Set the secret values
+# (OPENAI_API_KEY / GOOGLE_API_KEY / ALLOWED_ORIGINS) in the dashboard.
+services:
+  - type: web
+    name: medha-ai-backend
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Token-signing secret — Render generates a strong value once and keeps it.
+      - key: AUTH_SECRET_KEY
+        generateValue: true
+      - key: AUTH_ENFORCE
+        value: "true"
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "30"
+      # Set these in the Render dashboard (marked secret / not synced from git):
+      - key: ALLOWED_ORIGINS      # e.g. https://your-app.vercel.app
+        sync: false
+      - key: OPENAI_API_KEY       # primary LLM (optional if using Gemini)
+        sync: false
+      - key: GOOGLE_API_KEY       # fallback LLM (optional if using OpenAI)
+        sync: false
+
+    # ── Durable accounts (recommended for production) ────────────────────────
+    # The free plan resets the filesystem on every deploy, so the SQLite user
+    # database (users.db) — and therefore all signups — is lost on redeploy.
+    # To keep accounts: change `plan` above to `starter` and UNCOMMENT the two
+    # blocks below (a persistent disk + a DB path that lives on it). Or migrate
+    # auth to a managed Postgres instead of SQLite.
+    #
+    #   - key: AUTH_DB_PATH
+    #     value: /var/data/users.db
+    #
+    # disk:
+    #   name: medha-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
