@@ -1,0 +1,12 @@
+{
+  "appId": "com.medhaai.fortuneguru",
+  "appName": "Fortune Guru",
+  "webDir": "build",
+  "backgroundColor": "#1a1333",
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "contentInset": "always"
+  }
+}

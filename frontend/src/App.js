@@ -24,24 +24,6 @@ const GURU_IMAGE_CANDIDATES = [
   '/fortune-guru-logo.png'
 ];
 
-const SIDE_IMAGE_LEFT_CANDIDATES = [
-  '/shiv-parivar.png',
-  '/shiv_parivar.png',
-  '/shivparivar.png',
-  '/shiv-parivar.jpg',
-  '/shiv_parivar.jpg',
-  '/fortune-guru-logo.png'
-];
-
-const SIDE_IMAGE_RIGHT_CANDIDATES = [
-  '/lakshmi-narayan.png',
-  '/lakshmi_narayan.png',
-  '/lakshminarayan.png',
-  '/lakshmi-narayan.jpg',
-  '/lakshmi_narayan.jpg',
-  '/fortune-guru-logo.png'
-];
-
 const TEZI_COMMODITY_SUGGESTIONS = [
   'Gold', 'Silver', 'Crude Oil', 'Natural Gas', 'Copper', 'Aluminium',
   'Nifty 50', 'Bank Nifty', 'Sensex', 'USDINR', 'EURINR', 'JPYINR',
@@ -412,16 +394,8 @@ function LoginPage({ onLoginSuccess }) {
   return (
     <div style={pageStyle}>
       <div style={heroTopStyle}>Fortune Guru</div>
-      <div style={loginGridStyle}>
-        <img
-          src={SIDE_IMAGE_LEFT_CANDIDATES[0]}
-          data-fallbacks={SIDE_IMAGE_LEFT_CANDIDATES.slice(1).join('|')}
-          onError={handleImageFallback}
-          alt="Shiv Parivar"
-          style={sideImageStyle}
-        />
-
-        <section style={cardStyle}>
+      <div style={loginCenterStyle}>
+        <section style={{ ...cardStyle, maxWidth: 460, width: '100%' }}>
           <div style={avatarWrapStyle}>
             <img
               src={GURU_IMAGE_CANDIDATES[0]}
@@ -476,14 +450,6 @@ function LoginPage({ onLoginSuccess }) {
 
           {error ? <p style={errorStyle}>{error}</p> : null}
         </section>
-
-        <img
-          src={SIDE_IMAGE_RIGHT_CANDIDATES[0]}
-          data-fallbacks={SIDE_IMAGE_RIGHT_CANDIDATES.slice(1).join('|')}
-          onError={handleImageFallback}
-          alt="Lakshmi Narayan"
-          style={sideImageStyle}
-        />
       </div>
     </div>
   );
@@ -718,20 +684,11 @@ function KundliPage({ onLogout }) {
 
 
   if (loading) return (
-    <div style={loadingStyle}>
-      <img
-        src={gurujiAvatar}
-        alt="Guruji"
-        style={{ width: 120, borderRadius: '50%', marginBottom: 16, animation: 'guruji-blink 2s infinite', cursor: 'pointer' }}
-        onClick={handleAvatarClick}
-      />
-      <div>Loading kundli...</div>
-      <div style={{ marginTop: 12, display: 'flex', gap: 8, flexDirection: 'column' }}>
-        <button onClick={() => playGurujiAudio('original')}>Guruji Original Voice</button>
-        <button onClick={() => playGurujiAudio('cloned')}>Guruji Cloned Voice</button>
-      </div>
-      <style>{`@keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }`}</style>
-    </div>
+    <KundliLoadingScreen
+      avatar={gurujiAvatar}
+      onAvatarClick={handleAvatarClick}
+      onPlay={playGurujiAudio}
+    />
   );
 
   if (error) {
@@ -1443,21 +1400,13 @@ const cardStyle = {
   boxShadow: '0 16px 34px rgba(2,6,23,0.45)'
 };
 
-const loginGridStyle = {
+const loginCenterStyle = {
   maxWidth: 1120,
   margin: '0 auto',
-  display: 'grid',
-  gridTemplateColumns: '1fr minmax(320px, 540px) 1fr',
-  gap: 16,
-  alignItems: 'center'
-};
-
-const sideImageStyle = {
-  width: '100%',
-  maxHeight: 540,
-  objectFit: 'cover',
-  borderRadius: 14,
-  border: '1px solid rgba(56,189,248,0.35)'
+  display: 'flex',
+  justifyContent: 'center',
+  alignItems: 'flex-start',
+  padding: '10px 0 40px'
 };
 
 const avatarWrapStyle = {
@@ -1668,5 +1617,97 @@ const floatingGuruImgStyle = {
   objectPosition: 'center top',
   background: 'rgba(15,23,42,0.82)'
 };
+
+const loadingCardStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  textAlign: 'center',
+  maxWidth: 420,
+  width: '100%',
+  padding: '24px 20px'
+};
+
+const loadingAvatarStyle = {
+  width: 118,
+  height: 118,
+  borderRadius: '50%',
+  objectFit: 'cover',
+  objectPosition: 'center top',
+  marginBottom: 18,
+  border: '2px solid rgba(34,211,238,0.7)',
+  animation: 'guruji-blink 2s infinite',
+  cursor: 'pointer'
+};
+
+const loadingTitleStyle = { fontSize: 20, fontWeight: 700, color: '#f8fafc', marginBottom: 10 };
+const loadingMsgStyle = { minHeight: 46, fontSize: 15, color: '#bae6fd', lineHeight: 1.5, marginBottom: 16 };
+
+const progressTrackStyle = {
+  position: 'relative',
+  width: '100%',
+  maxWidth: 280,
+  height: 6,
+  borderRadius: 999,
+  background: 'rgba(148,163,184,0.22)',
+  overflow: 'hidden'
+};
+
+const progressBarStyle = {
+  position: 'absolute',
+  top: 0,
+  bottom: 0,
+  left: '-42%',
+  width: '42%',
+  borderRadius: 999,
+  background: 'linear-gradient(90deg, rgba(13,148,136,0.9), rgba(59,130,246,0.95))',
+  animation: 'medha-progress-slide 1.25s ease-in-out infinite'
+};
+
+const loadingHintStyle = { fontSize: 13, color: '#93c5fd', marginTop: 14, lineHeight: 1.5 };
+const loadingVoiceRowStyle = { marginTop: 18, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' };
+
+const KUNDLI_LOADING_MESSAGES = [
+  'Aapke janm-vivaran se kundli banayi ja rahi hai...',
+  'Grah, rashi aur nakshatra ki sthiti compute ho rahi hai...',
+  'Bhaav aur Vimshottari dasha timeline taiyaar ho rahi hai...',
+  'Guru Ji aapke chart ka vishleshan likh rahe hain...',
+  'Antim sanket, timing aur upay jode ja rahe hain...'
+];
+
+function KundliLoadingScreen({ avatar, onAvatarClick, onPlay }) {
+  const [msgIdx, setMsgIdx] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      setMsgIdx((i) => (i + 1) % KUNDLI_LOADING_MESSAGES.length);
+    }, 3200);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div style={loadingStyle}>
+      <div style={loadingCardStyle}>
+        <img src={avatar} alt="Guru Ji" onClick={onAvatarClick} style={loadingAvatarStyle} />
+        <div style={loadingTitleStyle}>Guru Ji aapki kundli dekh rahe hain</div>
+        <div style={loadingMsgStyle}>{KUNDLI_LOADING_MESSAGES[msgIdx]}</div>
+        <div style={progressTrackStyle}>
+          <div style={progressBarStyle} />
+        </div>
+        <div style={loadingHintStyle}>
+          Ismein aam taur par 30&ndash;60 second lag sakte hain. Kripya page band na karein.
+        </div>
+        <div style={loadingVoiceRowStyle}>
+          <button style={secondaryButtonStyle} onClick={() => onPlay('original')}>Guru Ji Original Voice</button>
+          <button style={secondaryButtonStyle} onClick={() => onPlay('cloned')}>Guru Ji Cloned Voice</button>
+        </div>
+      </div>
+      <style>{`
+        @keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.72; } }
+        @keyframes medha-progress-slide { 0% { left: -42%; } 100% { left: 100%; } }
+      `}</style>
+    </div>
+  );
+}
 
 export default App;
