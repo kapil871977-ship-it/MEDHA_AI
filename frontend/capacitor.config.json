@@ -2,11 +2,34 @@
   "appId": "com.medhaai.fortuneguru",
   "appName": "Fortune Guru",
   "webDir": "build",
-  "backgroundColor": "#1a1333",
+  "backgroundColor": "#020617",
   "android": {
-    "allowMixedContent": false
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
   },
   "ios": {
     "contentInset": "always"
+  },
+  "server": {
+    "androidScheme": "https",
+    "iosScheme": "https"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#020617FF",
+      "androidSplashResourceName": "splash",
+      "androidScaleType": "CENTER_CROP",
+      "showSpinner": true,
+      "androidSpinnerStyle": "large",
+      "spinnerColor": "#67e8f9"
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#020617",
+      "overlaysWebView": false
+    }
   }
 }

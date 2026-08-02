@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
-    "@capacitor/android": "^6.1.2",
-    "@capacitor/core": "^6.1.2",
-    "@capacitor/ios": "^6.1.2",
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
+    "@capacitor/splash-screen": "^8.0.2",
+    "@capacitor/status-bar": "^8.0.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -16,7 +19,8 @@
     "web-vitals": "^2.1.4"
   },
   "devDependencies": {
-    "@capacitor/cli": "^6.1.2"
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.0"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -25,7 +29,11 @@
     "eject": "react-scripts eject",
     "cap:sync": "react-scripts build && cap sync",
     "cap:android": "cap open android",
-    "cap:ios": "cap open ios"
+    "cap:ios": "cap open ios",
+    "cap:assets": "python brand-assets/generate_icons.py && capacitor-assets generate",
+    "android:apk": "npm run cap:sync && cd android && gradlew.bat assembleRelease",
+    "android:bundle": "npm run cap:sync && cd android && gradlew.bat bundleRelease",
+    "android:run": "npm run cap:sync && cap run android"
   },
   "eslintConfig": {
     "extends": [

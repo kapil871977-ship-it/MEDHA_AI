@@ -10,7 +10,9 @@
  *
  * Bump CACHE_VERSION whenever you want clients to drop the old cache.
  */
-const CACHE_VERSION = 'medha-ai-v1';
+// Bumped to v2: app icons, logo and manifest were replaced, so returning
+// visitors must drop the v1 cache rather than keep serving the old assets.
+const CACHE_VERSION = 'medha-ai-v2';
 const APP_SHELL = ['./', './index.html', './manifest.json', './favicon.ico'];
 
 self.addEventListener('install', (event) => {

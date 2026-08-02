@@ -1,14 +1,42 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
 
-const API_BASE_URLS = [
-  process.env.REACT_APP_API_URL,
-  'http://127.0.0.1:8010'
-].filter(Boolean);
+// True when running inside the Capacitor native shell (Android/iOS), where the
+// bridge injects `window.Capacitor`. Checked lazily so the web build and the
+// Jest environment never need the native runtime.
+function isNativeApp() {
+  return typeof window !== 'undefined'
+    && typeof window.Capacitor?.isNativePlatform === 'function'
+    && window.Capacitor.isNativePlatform() === true;
+}
 
-const REQUEST_TIMEOUT_MS = 70000;
-const KUNDLI_REQUEST_TIMEOUT_MS = 80000;
-const DASHA_REQUEST_TIMEOUT_MS = 70000;
+// A phone cannot reach the developer's localhost, so the loopback fallback is
+// only useful for browser development. Including it on device meant every
+// request burned a full timeout against an address that can never answer.
+// Resolved per request rather than at module load, so it is correct no matter
+// when the Capacitor bridge finishes initialising.
+function getApiBaseUrls() {
+  const configured = process.env.REACT_APP_API_URL;
+  if (isNativeApp()) {
+    return [configured].filter(Boolean);
+  }
+  return [configured, 'http://127.0.0.1:8010'].filter(Boolean);
+}
+
+// Local (not UTC) calendar date as YYYY-MM-DD. `toISOString()` returns the UTC
+// day, which is the previous date for IST users before 05:30 local time.
+function toLocalDateString(dateObj) {
+  const d = dateObj instanceof Date ? dateObj : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Each must exceed the matching server-side model timeout (75s general,
+// 90s kundli) so the server can return its graceful fallback instead of the
+// browser aborting first and showing a bare network error.
+const REQUEST_TIMEOUT_MS = 90000;
+const KUNDLI_REQUEST_TIMEOUT_MS = 105000;
+const DASHA_REQUEST_TIMEOUT_MS = 95000;
 
 const FORM_STORAGE_KEY = 'medha_kundli_form_data';
 const AUTH_STORAGE_KEY = 'medha_is_logged_in';
@@ -24,10 +52,14 @@ const GURU_IMAGE_CANDIDATES = [
   '/fortune-guru-logo.png'
 ];
 
+// Only instruments the backend can actually resolve to a price symbol.
+// Mustard, Jeera and Turmeric were previously offered here but have no
+// mapping, so they silently returned a signal with no price attached.
 const TEZI_COMMODITY_SUGGESTIONS = [
   'Gold', 'Silver', 'Crude Oil', 'Natural Gas', 'Copper', 'Aluminium',
   'Nifty 50', 'Bank Nifty', 'Sensex', 'USDINR', 'EURINR', 'JPYINR',
-  'Soybean', 'Mustard', 'Jeera', 'Turmeric', 'Cotton', 'Sugar', 'Wheat', 'Rice'
+  'Soybean', 'Corn', 'Cotton', 'Sugar', 'Wheat', 'Rice', 'Coffee',
+  'Bitcoin', 'Ethereum'
 ];
 
 const HOUSE_NAME_HI = {
@@ -67,32 +99,52 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
   }
 }
 
-async function postWithFallback(endpointPath, payload, options = {}) {
-  const timeoutMs = options?.timeoutMs || REQUEST_TIMEOUT_MS;
-  let lastError = null;
+function clearSession() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_IDENTIFIER_KEY);
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+/**
+ * Issue a request against the first reachable API base URL.
+ * Handles bearer auth, 401 session expiry, 429 throttling and timeouts.
+ */
+async function apiRequest(endpointPath, options = {}) {
+  const { method = 'POST', payload, timeoutMs = REQUEST_TIMEOUT_MS } = options;
+  const baseUrls = getApiBaseUrls();
+
+  if (!baseUrls.length) {
+    throw new Error(
+      'Server address configure nahi hai. App ko REACT_APP_API_URL ke saath build karein.'
+    );
+  }
 
   const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = {};
+  if (payload !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  for (const baseUrl of API_BASE_URLS) {
+  let lastError = null;
+
+  for (const baseUrl of baseUrls) {
     try {
       const res = await fetchWithTimeout(`${baseUrl}${endpointPath}`, {
-        method: 'POST',
+        method,
         headers,
-        body: JSON.stringify(payload)
+        ...(payload !== undefined ? { body: JSON.stringify(payload) } : {})
       }, timeoutMs);
 
       if (res.status === 401) {
         // Session expired or invalid — clear auth and force re-login.
-        localStorage.removeItem(AUTH_TOKEN_KEY);
-        localStorage.removeItem(AUTH_IDENTIFIER_KEY);
-        localStorage.removeItem(AUTH_STORAGE_KEY);
+        clearSession();
         if (window.location.hash !== '#login') window.location.hash = '#login';
         throw new Error('Session expired. Kripya dubara login karein.');
       }
       if (res.status === 429) {
         throw new Error('Bahut zyada requests. Kripya ek minute baad try karein.');
+      }
+      if (res.status === 404) {
+        throw new Error('Yeh record nahi mila.');
       }
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -113,6 +165,10 @@ async function postWithFallback(endpointPath, payload, options = {}) {
   }
 
   throw lastError || new Error('Backend unavailable');
+}
+
+async function postWithFallback(endpointPath, payload, options = {}) {
+  return apiRequest(endpointPath, { ...options, method: 'POST', payload });
 }
 
 function handleImageFallback(event) {
@@ -305,6 +361,65 @@ function sanitizeHouseAnalysis(analysis) {
   return text;
 }
 
+/** App title. Rendered as the single <h1> on every page. */
+function Brand() {
+  return <h1 style={heroTopStyle}>Fortune Guru</h1>;
+}
+
+/**
+ * Native-shell wiring (no-op in the browser):
+ *  - hides the splash screen once React has mounted
+ *  - styles the Android status bar to match the app background
+ *  - maps the hardware back button to in-app navigation instead of
+ *    closing the app from any screen
+ */
+function useNativeShell(route) {
+  useEffect(() => {
+    if (!isNativeApp()) return undefined;
+
+    let removeBackListener = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const [{ App: CapApp }, { StatusBar, Style }, { SplashScreen }] = await Promise.all([
+          import('@capacitor/app'),
+          import('@capacitor/status-bar'),
+          import('@capacitor/splash-screen')
+        ]);
+        if (cancelled) return;
+
+        StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+        StatusBar.setBackgroundColor({ color: '#020617' }).catch(() => {});
+        SplashScreen.hide().catch(() => {});
+
+        const handle = await CapApp.addListener('backButton', ({ canGoBack }) => {
+          const current = window.location.hash || '#home';
+          if (current !== '#home' && current !== '#login') {
+            window.location.hash = '#home';
+          } else if (canGoBack) {
+            window.history.back();
+          } else {
+            CapApp.exitApp();
+          }
+        });
+        if (cancelled) {
+          handle.remove();
+          return;
+        }
+        removeBackListener = () => handle.remove();
+      } catch {
+        // Plugins unavailable — the app still works, just without the extras.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (removeBackListener) removeBackListener();
+    };
+  }, [route]);
+}
+
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(Boolean(localStorage.getItem(AUTH_TOKEN_KEY)));
   const [route, setRoute] = useState(window.location.hash || '#home');
@@ -315,23 +430,52 @@ function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
+  useNativeShell(route);
+
+  // A stored token can be expired or signed with an old server secret. Verify
+  // it once on start-up so the user lands on the login screen immediately
+  // instead of hitting an error on their first real request.
+  useEffect(() => {
+    if (!localStorage.getItem(AUTH_TOKEN_KEY)) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiRequest('/auth/me', { method: 'GET', timeoutMs: 15000 });
+        if (!cancelled && res && res.authenticated === false) {
+          clearSession();
+          setIsLoggedIn(false);
+          window.location.hash = '#login';
+        }
+      } catch {
+        // Offline or backend down: keep the cached session so saved reports
+        // remain readable; the next real request will surface any problem.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const handleLogout = () => {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_IDENTIFIER_KEY);
-    localStorage.removeItem(AUTH_STORAGE_KEY);
+    clearSession();
     setIsLoggedIn(false);
     window.location.hash = '#login';
   };
 
+  const onLoginSuccess = () => setIsLoggedIn(true);
+
+  const guarded = (element) => (isLoggedIn ? element : <LoginPage onLoginSuccess={onLoginSuccess} />);
+
   let page = null;
   if (route === '#login') {
-    page = <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+    page = <LoginPage onLoginSuccess={onLoginSuccess} />;
   } else if (route === '#kundli') {
-    page = isLoggedIn ? <KundliPage onLogout={handleLogout} /> : <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+    page = guarded(<KundliPage onLogout={handleLogout} />);
   } else if (route === '#remedies') {
-    page = isLoggedIn ? <RemediesPage onLogout={handleLogout} /> : <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+    page = guarded(<RemediesPage onLogout={handleLogout} />);
+  } else if (route === '#history') {
+    page = guarded(<HistoryPage onLogout={handleLogout} />);
   } else {
-    page = isLoggedIn ? <HomePage onLogout={handleLogout} /> : <LoginPage onLoginSuccess={() => setIsLoggedIn(true)} />;
+    page = guarded(<HomePage onLogout={handleLogout} />);
   }
 
   return (
@@ -393,7 +537,7 @@ function LoginPage({ onLoginSuccess }) {
 
   return (
     <div style={pageStyle}>
-      <div style={heroTopStyle}>Fortune Guru</div>
+      <Brand />
       <div style={loginCenterStyle}>
         <section style={{ ...cardStyle, maxWidth: 460, width: '100%' }}>
           <div style={avatarWrapStyle}>
@@ -477,12 +621,36 @@ function HomePage({ onLogout }) {
   });
 
   const openKundliPage = () => {
-    if (!formData.first_name || !formData.dob || !formData.tob || !formData.place) {
-      setMessage('Naam, DOB, TOB aur Place bharna zaroori hai.');
+    const missing = [];
+    if (!formData.first_name?.trim()) missing.push('Naam');
+    if (!formData.dob) missing.push('Janam Tarikh');
+    if (!formData.tob) missing.push('Janam Samay');
+    if (!formData.place?.trim()) missing.push('Janam Sthan');
+    if (missing.length) {
+      setMessage(`Yeh field bharna zaroori hai: ${missing.join(', ')}.`);
+      return;
+    }
+
+    const dobDate = new Date(`${formData.dob}T00:00:00`);
+    if (Number.isNaN(dobDate.getTime())) {
+      setMessage('Janam tarikh sahi format me nahi hai.');
+      return;
+    }
+    if (dobDate > new Date()) {
+      setMessage('Janam tarikh future me nahi ho sakti.');
       return;
     }
 
     localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify(formData));
+
+    // A native WebView has no tabs — window.open would either be ignored or
+    // bounce the user out into the system browser (where the session and the
+    // saved form do not exist). Navigate in place there.
+    if (isNativeApp()) {
+      window.location.hash = '#kundli';
+      return;
+    }
+
     const url = `${window.location.origin}${window.location.pathname}#kundli`;
     const newTab = window.open(url, '_blank', 'noopener,noreferrer');
 
@@ -497,11 +665,15 @@ function HomePage({ onLogout }) {
 
   return (
     <div style={pageStyle}>
-      <div style={heroTopStyle}>Fortune Guru</div>
+      <Brand />
       <div style={{ ...cardStyle, maxWidth: 860 }}>
         <div style={rowBetweenStyle}>
-          <h1 style={titleStyle}>Basic Details Form</h1>
-          <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
+          <h2 style={titleStyle}>Basic Details Form</h2>
+          <div style={rowWrapStyle}>
+            <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#history'; }}>Saved Reports</button>
+            <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#remedies'; }}>Remedies</button>
+            <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
+          </div>
         </div>
 
         <label style={labelStyle}>Aapka Naam</label>
@@ -644,8 +816,8 @@ function KundliPage({ onLogout }) {
 
   // Guruji avatar and voice activation UI
 
-  const [gurujiSpeaking, setGurujiSpeaking] = useState(false);
   const [gurujiAudio, setGurujiAudio] = useState(null);
+  const [voiceNotice, setVoiceNotice] = useState('');
   const gurujiAvatars = [
     '/guruji/guruji1.jpeg',
     '/guruji/guruji2.jpeg',
@@ -664,23 +836,39 @@ function KundliPage({ onLogout }) {
   // Cycle avatar on click
   const handleAvatarClick = () => setAvatarIdx((i) => (i + 1) % gurujiAvatars.length);
 
-  // Play Guruji audio (original or cloned)
+  // Play Guru Ji audio (original or cloned).
+  // The voice files may be absent or empty, and browsers also block autoplay,
+  // so every failure path is handled instead of leaving a rejected promise
+  // and a permanently "speaking" state behind.
   const playGurujiAudio = (type) => {
     if (gurujiAudio) {
       gurujiAudio.pause();
       setGurujiAudio(null);
     }
-    let src = '';
-    if (type === 'original') src = '/guruji/guruji_original.mpeg';
-    else if (type === 'cloned') src = '/guruji/guruji_cloned.mpeg';
-    if (src) {
-      const audio = new window.Audio(src);
-      setGurujiAudio(audio);
-      setGurujiSpeaking(true);
-      audio.onended = () => setGurujiSpeaking(false);
-      audio.play();
+    setVoiceNotice('');
+
+    const src = type === 'original'
+      ? '/guruji/guruji_original.mpeg'
+      : type === 'cloned' ? '/guruji/guruji_cloned.mpeg' : '';
+    if (!src) return;
+
+    const audio = new window.Audio(src);
+    const failed = () => {
+      setGurujiAudio(null);
+      setVoiceNotice('Guru Ji ki voice file abhi uplabdh nahi hai.');
+    };
+    audio.onended = () => setGurujiAudio(null);
+    audio.onerror = failed;
+    setGurujiAudio(audio);
+
+    const played = audio.play();
+    if (played && typeof played.catch === 'function') {
+      played.catch(failed);
     }
   };
+
+  // Stop any playing audio when this screen goes away.
+  useEffect(() => () => { if (gurujiAudio) gurujiAudio.pause(); }, [gurujiAudio]);
 
 
   if (loading) return (
@@ -688,6 +876,7 @@ function KundliPage({ onLogout }) {
       avatar={gurujiAvatar}
       onAvatarClick={handleAvatarClick}
       onPlay={playGurujiAudio}
+      voiceNotice={voiceNotice}
     />
   );
 
@@ -696,14 +885,19 @@ function KundliPage({ onLogout }) {
       <div style={errorPageStyle}>
         <img
           src={gurujiAvatar}
-          alt="Guruji"
+          data-fallbacks={GURU_IMAGE_CANDIDATES.join('|')}
+          onError={handleImageFallback}
+          alt="Guru Ji"
           style={{ width: 120, borderRadius: '50%', marginBottom: 16, animation: 'guruji-blink 2s infinite', cursor: 'pointer' }}
           onClick={handleAvatarClick}
         />
         <div>{error}</div>
+        {voiceNotice ? <div style={mutedStyle}>{voiceNotice}</div> : null}
         <div style={{ marginTop: 12, display: 'flex', gap: 8, flexDirection: 'column' }}>
-          <button onClick={() => playGurujiAudio('original')}>Guruji Original Voice</button>
-          <button onClick={() => playGurujiAudio('cloned')}>Guruji Cloned Voice</button>
+          <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#home'; }}>Home par wapas jayein</button>
+          <button style={secondaryButtonStyle} onClick={() => window.location.reload()}>Dubara try karein</button>
+          <button style={secondaryButtonStyle} onClick={() => playGurujiAudio('original')}>Guru Ji Original Voice</button>
+          <button style={secondaryButtonStyle} onClick={() => playGurujiAudio('cloned')}>Guru Ji Cloned Voice</button>
         </div>
         <style>{`@keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }`}</style>
       </div>
@@ -734,11 +928,15 @@ function KundliPage({ onLogout }) {
 
   return (
     <div style={pageStyle}>
-      <div style={heroTopStyle}>Fortune Guru</div>
+      <Brand />
       <div style={{ ...cardStyle, maxWidth: 1120 }}>
         <div style={rowBetweenStyle}>
-          <h1 style={titleStyle}>{data?.title || 'Trividha Kundli Vishleshan'}</h1>
-          <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
+          <h2 style={titleStyle}>{data?.title || 'Trividha Kundli Vishleshan'}</h2>
+          <div style={rowWrapStyle}>
+            <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#home'; }}>Home</button>
+            <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#history'; }}>Saved Reports</button>
+            <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
+          </div>
         </div>
 
         {warning ? <p style={warnStyle}>{warning}</p> : null}
@@ -784,6 +982,84 @@ function RemedyBlock({ remedies }) {
   );
 }
 
+/**
+ * KP (Krishnamurti Paddhati) cusp sub-lord table.
+ *
+ * The backend computes this for every section — sub-lord per cusp, the houses
+ * each sub-lord links to, and the event window from the current antardasha —
+ * but nothing rendered it, so the whole analysis was discarded client-side.
+ */
+function KpCuspPanel({ table, topHouses, window: eventWindow }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const rows = Array.isArray(table) ? table.filter((r) => r && r.sublord) : [];
+  const top = Array.isArray(topHouses) ? topHouses.filter((r) => r && r.sublord) : [];
+  const start = String(eventWindow?.start || '').trim();
+  const end = String(eventWindow?.end || '').trim();
+
+  if (!rows.length && !top.length && !start && !end) return null;
+
+  return (
+    <div style={sectionInnerStyle}>
+      <h3 style={smallHeadStyle}>KP Cusp Sub-Lord Vishleshan</h3>
+      {start || end ? (
+        <p style={mutedStyle}>
+          Event window: {start || '?'} se {end || '?'} tak
+        </p>
+      ) : null}
+
+      {top.length > 0 ? (
+        <p style={textStyle}>
+          Sabse sakriya bhav:{' '}
+          {top.slice(0, 3).map((r) => `Bhav ${r.house} (${r.sublord})`).join(', ')}
+        </p>
+      ) : null}
+
+      {rows.length > 0 ? (
+        <>
+          <button
+            type="button"
+            style={secondaryButtonStyle}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? 'Poori KP table chhupayein' : 'Poori KP table dekhein'}
+          </button>
+          {expanded ? (
+            <div style={{ overflowX: 'auto', marginTop: 10 }}>
+              <table style={kpTableStyle}>
+                <thead>
+                  <tr>
+                    <th style={kpThStyle}>Bhav</th>
+                    <th style={kpThStyle}>Nakshatra</th>
+                    <th style={kpThStyle}>Nakshatra Swami</th>
+                    <th style={kpThStyle}>Sub-Lord</th>
+                    <th style={kpThStyle}>Linked Bhav</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={`kp-${r.house}`}>
+                      <td style={kpTdStyle}>{r.house}</td>
+                      <td style={kpTdStyle}>{r.nakshatra || '-'}</td>
+                      <td style={kpTdStyle}>{r.nakshatra_lord || '-'}</td>
+                      <td style={kpTdStyle}>{r.sublord || '-'}</td>
+                      <td style={kpTdStyle}>
+                        {Array.isArray(r.linked_houses) && r.linked_houses.length
+                          ? r.linked_houses.join(', ')
+                          : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function KundliSection({ title, block }) {
   const houses = Array.isArray(block?.houses) ? block.houses : [];
   // Remove unwanted fallback phrase from predictions
@@ -821,6 +1097,11 @@ function KundliSection({ title, block }) {
           </ul>
         </>
       ) : null}
+      <KpCuspPanel
+        table={kpFullCuspTable}
+        topHouses={kpTopEventHouses}
+        window={kpWindow}
+      />
       {houses.length > 0 ? (
         <>
           <h3 style={smallHeadStyle}>12 Houses</h3>
@@ -831,7 +1112,6 @@ function KundliSection({ title, block }) {
               const issues = Array.isArray(h?.possible_issues)
                 ? h.possible_issues.map((x) => String(x || '').trim()).filter(Boolean)
                 : [];
-              const healthNote = String(h?.health_note || '').trim();
               return (
                 <article key={`h-${i}`} style={houseCardStyle}>
                   <p style={houseTitleStyle}>{getHouseHeading(h.house, h.name)}</p>
@@ -865,9 +1145,80 @@ function DashaSection({ prediction, loading, error }) {
   );
 }
 
+/**
+ * Closing price shown in the currency and unit the exchange actually quotes,
+ * with an indicative INR conversion for USD-quoted instruments.
+ *
+ * The old table hard-coded "Price (रु.)" and per-gram / per-kg / per-quintal
+ * rows for every instrument. Those symbols are USD-quoted (COMEX gold is USD
+ * per troy ounce, CBOT wheat is US cents per bushel, Nifty is index points),
+ * so the headline figure was wrong in both currency and magnitude.
+ */
+function PriceBreakdownTable({ result }) {
+  const currency = String(result.price_currency || '').trim();
+  const unit = result.price_base_unit || 'unit';
+  const fmt = (v) => (v === null || v === undefined ? null : Number(v).toLocaleString(undefined, {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  }));
+
+  const rows = [
+    { label: `प्रति ${unit}`, native: result.price_per_base_unit, inr: result.price_inr_per_base_unit },
+    { label: 'प्रति ग्राम', native: result.price_per_gram, inr: result.price_inr_per_gram },
+    { label: 'प्रति किलो', native: result.price_per_kg, inr: result.price_inr_per_kg },
+    { label: 'प्रति क्विंटल', native: result.price_per_quintal, inr: result.price_inr_per_quintal }
+  ].filter((r) => r.native !== null && r.native !== undefined);
+
+  const showInr = currency !== 'INR' && rows.some((r) => r.inr !== null && r.inr !== undefined);
+  const move = result.historical_change_percent !== null && result.historical_change_percent !== undefined
+    ? `${Math.abs(Number(result.historical_change_percent)).toFixed(2)}%`
+    : 'N/A';
+
+  return (
+    <>
+      <p style={textStyle}>
+        Closing Figure: {currency} {fmt(result.price_per_base_unit ?? result.historical_close_rate)} per {unit}
+        {' | '}Direction: {String(result.historical_market_direction || 'neutral').toUpperCase()}
+        {' | '}Move: {move}
+        {result.quote_symbol ? ` | Source: ${result.quote_symbol}` : ''}
+      </p>
+
+      {rows.length > 0 ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={kpTableStyle}>
+            <thead>
+              <tr>
+                <th style={kpThStyle}>Unit (इकाई)</th>
+                <th style={kpThStyle}>Price ({currency || '-'})</th>
+                {showInr ? <th style={kpThStyle}>Approx INR</th> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.label}>
+                  <td style={kpTdStyle}>{r.label}</td>
+                  <td style={kpTdStyle}>{fmt(r.native) ?? 'N/A'}</td>
+                  {showInr ? <td style={kpTdStyle}>{fmt(r.inr) ?? 'N/A'}</td> : null}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+
+      {showInr ? (
+        <p style={mutedStyle}>
+          INR figures convert the international price
+          {result.price_fx_usd_inr ? ` at ${Number(result.price_fx_usd_inr).toFixed(2)} USD/INR` : ''}.
+          Indian retail rates additionally carry import duty, GST and a local premium.
+        </p>
+      ) : null}
+    </>
+  );
+}
+
 function TeziMandiPanel({ formData }) {
   const [product, setProduct] = useState('Gold');
-  const [targetDate, setTargetDate] = useState(new Date().toISOString().slice(0, 10));
+  const [targetDate, setTargetDate] = useState(toLocalDateString(new Date()));
   const [productSuggestions, setProductSuggestions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -884,7 +1235,7 @@ function TeziMandiPanel({ formData }) {
 
   const dateSuggestions = useMemo(() => {
     const base = new Date();
-    const fmt = (d) => d.toISOString().slice(0, 10);
+    const fmt = toLocalDateString;
     const add = (n) => {
       const x = new Date(base);
       x.setDate(x.getDate() + n);
@@ -951,18 +1302,31 @@ function TeziMandiPanel({ formData }) {
       return;
     }
 
+    if (!formData?.dob || !formData?.tob) {
+      setError('Pehle home page par janam vivaran bharein, tabhi Tezi-Mandi chalega.');
+      return;
+    }
+
     setLoading(true);
     setError('');
     setResult(null);
 
     try {
+      // Compare against null/undefined, not truthiness: latitude or longitude
+      // of exactly 0 is a valid coordinate (equator / prime meridian).
+      const toCoord = (value) => (
+        value === null || value === undefined || value === '' || Number.isNaN(Number(value))
+          ? null
+          : Number(value)
+      );
+
       const payload = {
         first_name: formData?.first_name || 'User',
         dob: formData?.dob,
         tob: formData?.tob,
         place: formData?.place,
-        lat: formData?.lat ? Number(formData.lat) : null,
-        lng: formData?.lng ? Number(formData.lng) : null,
+        lat: toCoord(formData?.lat),
+        lng: toCoord(formData?.lng),
         language: formData?.language || 'hi',
         product: product.trim(),
         target_date: targetDate,
@@ -984,7 +1348,7 @@ function TeziMandiPanel({ formData }) {
         target_date: nextResult.target_date,
         signal: nextResult.display_signal_hi || nextResult.signal,
         summary: nextResult.mode === 'historical'
-          ? `${nextResult.historical_session_date || nextResult.target_date} close Rs ${nextResult.price_per_base_unit ?? nextResult.historical_close_rate ?? '-'} per ${nextResult.price_base_unit || 'unit'} | ${nextResult.historical_market_direction || 'neutral'}`
+          ? `${nextResult.historical_session_date || nextResult.target_date} close ${nextResult.price_currency || ''} ${nextResult.price_per_base_unit ?? nextResult.historical_close_rate ?? '-'} per ${nextResult.price_base_unit || 'unit'} | ${nextResult.historical_market_direction || 'neutral'}`.replace(/\s+/g, ' ')
           : `Up ${nextResult.chance_up_percent ?? '-'}% | Neutral ${nextResult.chance_neutral_percent ?? '-'}% | Down ${nextResult.chance_down_percent ?? '-'}%`,
         created_at: new Date().toISOString(),
       };
@@ -1097,39 +1461,7 @@ function TeziMandiPanel({ formData }) {
           ) : null}
           <p style={textStyle}>{result.summary}</p>
           {result.mode === 'historical' && result.historical_close_rate !== null && result.historical_close_rate !== undefined ? (
-            <>
-              <p style={textStyle}>
-                Closing Figure: Rs {Number(result.price_per_base_unit ?? result.historical_close_rate).toFixed(2)} per {result.price_base_unit || 'unit'} | Direction: {String(result.historical_market_direction || 'neutral').toUpperCase()} | Move: {result.historical_change_percent !== null && result.historical_change_percent !== undefined ? `${Math.abs(Number(result.historical_change_percent)).toFixed(2)}%` : 'N/A'}
-              </p>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', color: '#e5e7eb', marginTop: 8 }}>
-                  <thead>
-                    <tr>
-                      <th style={{ borderBottom: '1px solid #374151', textAlign: 'left', padding: '8px 6px' }}>Unit (इकाई)</th>
-                      <th style={{ borderBottom: '1px solid #374151', textAlign: 'left', padding: '8px 6px' }}>Price (रु.)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>प्रति {result.price_base_unit || 'unit'}</td>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>{result.price_per_base_unit !== null && result.price_per_base_unit !== undefined ? Number(result.price_per_base_unit).toFixed(2) : '-'}</td>
-                    </tr>
-                    <tr>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>प्रति ग्राम</td>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>{result.price_per_gram !== null && result.price_per_gram !== undefined ? Number(result.price_per_gram).toFixed(2) : 'N/A'}</td>
-                    </tr>
-                    <tr>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>प्रति किलो</td>
-                      <td style={{ borderBottom: '1px solid #1f2937', padding: '8px 6px' }}>{result.price_per_kg !== null && result.price_per_kg !== undefined ? Number(result.price_per_kg).toFixed(2) : 'N/A'}</td>
-                    </tr>
-                    <tr>
-                      <td style={{ padding: '8px 6px' }}>प्रति क्विंटल</td>
-                      <td style={{ padding: '8px 6px' }}>{result.price_per_quintal !== null && result.price_per_quintal !== undefined ? Number(result.price_per_quintal).toFixed(2) : 'N/A'}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </>
+            <PriceBreakdownTable result={result} />
           ) : null}
           {result.mode !== 'historical' ? (
             <p style={textStyle}>
@@ -1142,7 +1474,12 @@ function TeziMandiPanel({ formData }) {
               Investment Action: {String(result.investment_advice_engine.action || 'avoid').toUpperCase()} | Reasons: {Array.isArray(result.investment_advice_engine.reason) && result.investment_advice_engine.reason.length > 0 ? result.investment_advice_engine.reason.join(' | ') : 'N/A'}
             </p>
           ) : null}
-          <p style={mutedStyle}>Confidence: {result.confidence}% | Volatility: {result.volatility}</p>
+          <p style={mutedStyle}>
+            Confidence: {result.confidence}% | Volatility: {result.volatility}
+            {Array.isArray(result.karaka_planets) && result.karaka_planets.length
+              ? ` | Karaka: ${result.karaka_planets.join(', ')}`
+              : ''}
+          </p>
           <h3 style={smallHeadStyle}>Graha Drivers</h3>
           <ul style={listStyle}>
             {(result.drivers || []).map((d, i) => <li key={`d-${i}`} style={listItemStyle}>{d}</li>)}
@@ -1322,10 +1659,10 @@ function RemediesPage({ onLogout }) {
 
   return (
     <div style={pageStyle}>
-      <div style={heroTopStyle}>Fortune Guru</div>
+      <Brand />
       <div style={{ ...cardStyle, maxWidth: 1100 }}>
         <div style={rowBetweenStyle}>
-          <h1 style={titleStyle}>Remedies</h1>
+          <h2 style={titleStyle}>Remedies</h2>
           <div style={rowWrapStyle}>
             <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#home'; }}>Home</button>
             <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
@@ -1345,6 +1682,125 @@ function RemediesPage({ onLogout }) {
               {remedies.map((r, i) => <li key={`rr-${i}`} style={listItemStyle}>{r}</li>)}
             </ul>
           ) : <p style={mutedStyle}>Kundli open karne ke baad remedies yahan dikhengi.</p>}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function formatSavedAt(isoString) {
+  const d = new Date(String(isoString || ''));
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString();
+}
+
+/**
+ * Readings saved server-side against the signed-in account, so they follow the
+ * user across devices instead of living only in one browser's localStorage.
+ */
+function HistoryPage({ onLogout }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState(null);
+
+  const loadHistory = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await apiRequest('/history', { method: 'GET', timeoutMs: 20000 });
+      setItems(Array.isArray(res?.items) ? res.items : []);
+    } catch (e) {
+      setError(`Saved reports load nahi ho paaye: ${String(e?.message || e)}`);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  const openReport = async (id) => {
+    setBusyId(id);
+    setError('');
+    try {
+      const res = await apiRequest(`/history/${id}`, { method: 'GET', timeoutMs: 20000 });
+      if (!res?.report) throw new Error('Report khali hai.');
+      localStorage.setItem(LATEST_KUNDLI_KEY, JSON.stringify(res.report));
+      window.location.hash = '#remedies';
+    } catch (e) {
+      setError(`Report khul nahi paayi: ${String(e?.message || e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const deleteReport = async (id) => {
+    setBusyId(id);
+    setError('');
+    try {
+      await apiRequest(`/history/${id}`, { method: 'DELETE', timeoutMs: 20000 });
+      setItems((prev) => prev.filter((it) => it.id !== id));
+    } catch (e) {
+      setError(`Report delete nahi ho paayi: ${String(e?.message || e)}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div style={pageStyle}>
+      <Brand />
+      <div style={{ ...cardStyle, maxWidth: 1100 }}>
+        <div style={rowBetweenStyle}>
+          <h2 style={titleStyle}>Saved Reports</h2>
+          <div style={rowWrapStyle}>
+            <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#home'; }}>Home</button>
+            <button style={secondaryButtonStyle} onClick={loadHistory} disabled={loading}>Refresh</button>
+            <button style={secondaryButtonStyle} onClick={onLogout}>Logout</button>
+          </div>
+        </div>
+
+        <p style={mutedStyle}>
+          Aapki kundli reports account ke saath save hoti hain, isliye kisi bhi device par milengi.
+        </p>
+
+        {error ? <p style={errorStyle}>{error}</p> : null}
+
+        <section style={sectionStyle}>
+          {loading ? <p style={textStyle}>Saved reports load ho rahe hain...</p> : null}
+          {!loading && items.length === 0 && !error ? (
+            <p style={mutedStyle}>Abhi koi saved report nahi hai. Ek kundli banayein, wo yahan apne aap save ho jayegi.</p>
+          ) : null}
+          {!loading && items.length > 0 ? (
+            <div style={houseGridStyle}>
+              {items.map((it) => (
+                <article key={`hist-${it.id}`} style={houseCardStyle}>
+                  <p style={houseTitleStyle}>{it.person_name || 'Unnamed'}</p>
+                  <p style={textStyle}>{it.title}</p>
+                  <p style={mutedStyle}>
+                    {it.dob}{it.tob ? ` ${it.tob}` : ''}{it.place ? ` | ${it.place}` : ''}
+                  </p>
+                  <p style={mutedStyle}>Saved: {formatSavedAt(it.created_at)}</p>
+                  <div style={rowWrapStyle}>
+                    <button
+                      style={secondaryButtonStyle}
+                      onClick={() => openReport(it.id)}
+                      disabled={busyId === it.id}
+                    >
+                      {busyId === it.id ? 'Kholi ja rahi hai...' : 'Kholein'}
+                    </button>
+                    <button
+                      style={secondaryButtonStyle}
+                      onClick={() => deleteReport(it.id)}
+                      disabled={busyId === it.id}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </section>
       </div>
     </div>
@@ -1377,7 +1833,12 @@ const pageStyle = {
   minHeight: '100vh',
   background: 'radial-gradient(circle at 15% 10%, rgba(14,116,144,0.22), transparent 45%), radial-gradient(circle at 85% 18%, rgba(30,64,175,0.2), transparent 42%), linear-gradient(165deg, #020617, #0f172a 55%, #111827)',
   color: '#e5e7eb',
-  padding: '22px 18px 110px',
+  // Safe-area insets keep content clear of the Android/iOS status bar and the
+  // home indicator when the app runs full-screen inside the native shell.
+  paddingTop: 'calc(22px + env(safe-area-inset-top, 0px))',
+  paddingRight: 'calc(18px + env(safe-area-inset-right, 0px))',
+  paddingBottom: 'calc(110px + env(safe-area-inset-bottom, 0px))',
+  paddingLeft: 'calc(18px + env(safe-area-inset-left, 0px))',
   fontFamily: "Calibri, 'Segoe UI', Arial, sans-serif"
 };
 
@@ -1387,7 +1848,8 @@ const heroTopStyle = {
   color: '#67e8f9',
   fontFamily: "Calibri, 'Segoe UI', Arial, sans-serif",
   letterSpacing: '1px',
-  fontSize: 28
+  fontSize: 28,
+  fontWeight: 700
 };
 
 const cardStyle = {
@@ -1533,6 +1995,10 @@ const houseCardStyle = {
 
 const houseTitleStyle = { margin: '0 0 8px', color: '#93c5fd', fontWeight: 700 };
 
+const kpTableStyle = { width: '100%', borderCollapse: 'collapse', color: '#e5e7eb', fontSize: 14 };
+const kpThStyle = { borderBottom: '1px solid #374151', textAlign: 'left', padding: '8px 6px', color: '#bae6fd' };
+const kpTdStyle = { borderBottom: '1px solid #1f2937', padding: '8px 6px' };
+
 const textAreaStyle = {
   width: '100%',
   minHeight: 88,
@@ -1592,7 +2058,7 @@ const tickerStyle = {
   borderTop: '1px solid rgba(45,212,191,0.35)',
   background: 'rgba(2,6,23,0.92)',
   color: '#a7f3d0',
-  padding: '8px 14px',
+  padding: '8px 14px calc(8px + env(safe-area-inset-bottom, 0px))',
   textAlign: 'center',
   fontSize: 14
 };
@@ -1675,7 +2141,7 @@ const KUNDLI_LOADING_MESSAGES = [
   'Antim sanket, timing aur upay jode ja rahe hain...'
 ];
 
-function KundliLoadingScreen({ avatar, onAvatarClick, onPlay }) {
+function KundliLoadingScreen({ avatar, onAvatarClick, onPlay, voiceNotice }) {
   const [msgIdx, setMsgIdx] = useState(0);
 
   useEffect(() => {
@@ -1688,19 +2154,27 @@ function KundliLoadingScreen({ avatar, onAvatarClick, onPlay }) {
   return (
     <div style={loadingStyle}>
       <div style={loadingCardStyle}>
-        <img src={avatar} alt="Guru Ji" onClick={onAvatarClick} style={loadingAvatarStyle} />
+        <img
+          src={avatar}
+          data-fallbacks={GURU_IMAGE_CANDIDATES.join('|')}
+          onError={handleImageFallback}
+          alt="Guru Ji"
+          onClick={onAvatarClick}
+          style={loadingAvatarStyle}
+        />
         <div style={loadingTitleStyle}>Guru Ji aapki kundli dekh rahe hain</div>
         <div style={loadingMsgStyle}>{KUNDLI_LOADING_MESSAGES[msgIdx]}</div>
         <div style={progressTrackStyle}>
           <div style={progressBarStyle} />
         </div>
         <div style={loadingHintStyle}>
-          Ismein aam taur par 30&ndash;60 second lag sakte hain. Kripya page band na karein.
+          Ismein aam taur par 60&ndash;90 second lag sakte hain. Kripya page band na karein.
         </div>
         <div style={loadingVoiceRowStyle}>
           <button style={secondaryButtonStyle} onClick={() => onPlay('original')}>Guru Ji Original Voice</button>
           <button style={secondaryButtonStyle} onClick={() => onPlay('cloned')}>Guru Ji Cloned Voice</button>
         </div>
+        {voiceNotice ? <div style={loadingHintStyle}>{voiceNotice}</div> : null}
       </div>
       <style>{`
         @keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.72; } }

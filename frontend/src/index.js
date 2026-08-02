@@ -17,8 +17,16 @@ root.render(
 reportWebVitals();
 
 // ─── PWA: register the service worker so the app is installable + works offline
-// Registered only in production builds (the dev server should not be cached).
-if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
+// Registered only in production browser builds:
+//   - the dev server should not be cached
+//   - inside the Capacitor native shell the assets are already bundled on the
+//     device, and a service worker there just serves stale files after an app
+//     update, so it is deliberately skipped
+const isNativeShell =
+  typeof window.Capacitor?.isNativePlatform === 'function' &&
+  window.Capacitor.isNativePlatform() === true;
+
+if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production' && !isNativeShell) {
   window.addEventListener('load', () => {
     const swUrl = `${process.env.PUBLIC_URL || ''}/service-worker.js`;
     navigator.serviceWorker.register(swUrl).catch((err) => {

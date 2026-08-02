@@ -22,6 +22,19 @@ __pycache__/
 node_modules/
 frontend/node_modules/
 frontend/build/
+
+# ---- Native mobile (Capacitor) ----
+# The android/ and ios/ project folders ARE committed (they are your native
+# projects); only generated output and signing material are excluded.
+frontend/android/app/build/
+frontend/android/build/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/ios/App/build/
+frontend/ios/App/Pods/
+*.jks
+*.keystore
+keystore.properties
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
