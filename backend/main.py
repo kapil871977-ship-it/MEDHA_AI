@@ -8,7 +8,7 @@ import hashlib
 import base64
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, date as _date
 from zoneinfo import ZoneInfo
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
@@ -21,7 +21,6 @@ from fastapi import FastAPI, Header, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
-import concurrent.futures
 import logging
 logging.basicConfig(level=logging.INFO)
 import swisseph as swe
@@ -75,6 +74,18 @@ OWN_SIGNS = {
 }
 
 NAK_SPAN = 360.0 / 27.0  # ~13.333 degrees per nakshatra
+
+# TimezoneFinder loads a large polygon dataset on construction. Building one per
+# request made every chart computation pay that cost (and /kundli-analysis builds
+# two charts). Construct it once, lazily, and reuse it.
+_TZ_FINDER: Optional["TimezoneFinder"] = None
+
+
+def _timezone_finder() -> TimezoneFinder:
+    global _TZ_FINDER
+    if _TZ_FINDER is None:
+        _TZ_FINDER = TimezoneFinder()
+    return _TZ_FINDER
 
 SYSTEM_WEIGHTS = {
     "parashar": 0.5,
@@ -502,8 +513,18 @@ def _multi_system_analysis(
     scored = _condition_score(all_rules, flags)
 
     # Jaimini core: Atmakaraka + Karakamsa + directional purpose.
+    # The Atmakaraka is the planet with the highest degree *within its own sign*
+    # (0-30), NOT the highest absolute longitude around the zodiac.
     ak_candidates = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]
-    ak = max(ak_candidates, key=lambda p: float((planets.get(p) or {}).get("longitude", 0.0)))
+
+    def _degrees_in_sign(planet_name: str) -> float:
+        pdata = planets.get(planet_name) or {}
+        deg = pdata.get("degree_in_sign")
+        if deg is None:
+            deg = float(pdata.get("longitude", 0.0)) % 30.0
+        return float(deg)
+
+    ak = max(ak_candidates, key=_degrees_in_sign)
     ak_nav = str((planets.get(ak) or {}).get("navamsha_sign", ""))
     jaimini_score = 0.65 if ph.get(ak) in {1, 5, 9, 10, 11} else 0.45
 
@@ -626,14 +647,41 @@ def _compute_vedic_chart(dob: str, tob: str,
     if len(tob_clean) == 5:
         tob_clean += ":00"
 
-    tf = TimezoneFinder()
-    tz_name = (tf.timezone_at(lat=float(lat), lng=float(lng)) if lat is not None and lng is not None
-               else None) or "Asia/Kolkata"
-    tz = ZoneInfo(tz_name)
+    tz_name = None
+    if lat is not None and lng is not None:
+        try:
+            tz_name = _timezone_finder().timezone_at(lat=float(lat), lng=float(lng))
+        except Exception as tz_err:
+            print("TIMEZONE LOOKUP WARNING:", repr(tz_err))
+    try:
+        tz = ZoneInfo(tz_name or "Asia/Kolkata")
+    except Exception:
+        # A missing tz database (no `tzdata` installed) must not take the whole
+        # chart down — fall back to a fixed IST offset.
+        tz = timezone(timedelta(hours=5, minutes=30))
 
     dt_naive = datetime.strptime(f"{dob} {tob_clean}", "%Y-%m-%d %H:%M:%S")
     dt_local = dt_naive.replace(tzinfo=tz)
-    dt_utc = dt_local.astimezone(ZoneInfo("UTC"))
+
+    # ── Pre-standard-time births use LOCAL mean solar time ──
+    # Before a region adopted standard time (India 1906, Germany 1893, ...)
+    # clocks followed the birth place's own mean solar time. The IANA database
+    # models that era with the ZONE's reference city — Asia/Kolkata falls back
+    # to Calcutta's HMT (+5:53:20) — which is wrong by up to ~75 minutes for a
+    # birth elsewhere in the same zone. At roughly 1 degree of ascendant per 4
+    # minutes that is enough to shift the Lagna by a whole sign (a Porbandar
+    # 1869 birth came out Virgo instead of the correct Libra).
+    #
+    # Standard-time offsets are always whole multiples of 15 minutes; mean-time
+    # offsets are not. Use that to detect the pre-standard era and substitute
+    # the birth longitude's own mean solar offset.
+    if lng is not None:
+        offset = dt_local.utcoffset()
+        if offset is not None and int(offset.total_seconds()) % 900 != 0:
+            lmt = timezone(timedelta(hours=float(lng) / 15.0))
+            dt_local = dt_naive.replace(tzinfo=lmt)
+
+    dt_utc = dt_local.astimezone(timezone.utc)
 
     jd = swe.julday(dt_utc.year, dt_utc.month, dt_utc.day,
                     dt_utc.hour + dt_utc.minute / 60.0 + dt_utc.second / 3600.0)
@@ -696,7 +744,14 @@ def _compute_vedic_chart(dob: str, tob: str,
     planet_houses = {}
     house_cusps_sidereal: List[float] = []
     if lat is not None and lng is not None:
-        cusps, ascmc = swe.houses(jd, float(lat), float(lng), b"P")
+        # Placidus is undefined beyond the polar circles and Swiss Ephemeris
+        # raises there. Fall back to Whole-Sign/Equal ("W") so a birth in e.g.
+        # Tromso or Reykjavik still produces a chart instead of a 500.
+        try:
+            cusps, ascmc = swe.houses(jd, float(lat), float(lng), b"P")
+        except Exception as house_err:
+            print("HOUSE SYSTEM WARNING (falling back to whole-sign):", repr(house_err))
+            cusps, ascmc = swe.houses(jd, float(lat), float(lng), b"W")
         asc_sid = (ascmc[0] - ayanamsa) % 360.0
         house_cusps_sidereal = [round((float(c) - ayanamsa) % 360.0, 4) for c in list(cusps[:12])]
         a_rashi = int(asc_sid / 30)
@@ -1022,11 +1077,31 @@ api_key = os.getenv("GOOGLE_API_KEY", "").strip()
 openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
 model = None
 openai_client = None
-MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "150"))
-KUNDLI_MODEL_TIMEOUT_SECONDS = float(
-    os.getenv("KUNDLI_MODEL_TIMEOUT_SECONDS", str(min(MODEL_TIMEOUT_SECONDS, 55.0)))
-)
-OPENAI_MODEL = "gpt-4o-mini"
+# Must stay below the frontend's request timeouts, so the server can always
+# deliver its own graceful fallback before the browser aborts.
+# (The original 150s default was unreachable: the browser gave up at 70s.)
+MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "75"))
+# The kundli prompt asks for a large structured JSON document (three sections x
+# twelve houses, in Hindi), which measured at ~70s against a current Flash
+# model. A 70s budget therefore fell back roughly half the time purely on
+# timing jitter, discarding a perfectly good reading. 90s gives real headroom
+# while still sitting below the frontend's 105s abort.
+KUNDLI_MODEL_TIMEOUT_SECONDS = float(os.getenv("KUNDLI_MODEL_TIMEOUT_SECONDS", "90"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+
+# How many Gemini candidates to walk through within one request.
+#
+# This must comfortably exceed the number of models a key might 404 on, because
+# a key issued today rejects the whole Gemini 2.x family. With the cap set to 4,
+# a request could spend all four attempts on instant 404s and fail even though
+# working models sat further down the list. The 404s are free and take under a
+# second each, and the wall-clock deadline is enforced separately on every
+# iteration, so a generous cap costs nothing.
+_GEMINI_MAX_MODEL_ATTEMPTS = 10
+
+# Last provider failure, surfaced by /health so a degraded install is
+# diagnosable without reading server logs.
+_LAST_LLM_ERROR: Optional[str] = None
 
 # --- OpenAI init (primary) ---
 if openai_api_key and _OpenAIClient is not None:
@@ -1040,40 +1115,146 @@ else:
     print("INFO: OPENAI_API_KEY not set — will use Gemini")
 
 # --- Gemini init (fallback) ---
+# Ordered preference of general-purpose text models. `list_models()` also
+# returns image/TTS/robotics/research variants that cannot serve this workload,
+# so candidates are matched against this list rather than taken blindly.
+# Model preference, ordered to work across BOTH old and new API keys.
+#
+# `list_models()` is not a reliable availability signal: it happily lists
+# models that then return 404 "no longer available to new users" on the first
+# generateContent call. Which models a key can use depends on when the key was
+# issued — a recently-created key is granted only current-generation models and
+# 404s on the entire Gemini 2.x family, while older keys are the reverse.
+#
+# So: lead with the maintained "-latest" alias (it follows Google's current
+# best Flash model and survives retirements automatically), then explicit
+# current versions, then the lite variants as a higher-quota fallback for when
+# the daily cap on the full model is hit, then the 2.x family for older keys.
 PREFERRED_MODELS = [
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-2.5-pro",
-    "gemini-1.5-pro",
-    "gemini-pro",
+    "gemini-pro-latest",
 ]
+
+# Model names that must never be auto-selected for text generation.
+_MODEL_NAME_DENYLIST = (
+    "image", "tts", "audio", "robotics", "computer-use", "lyria",
+    "embedding", "deep-research", "omni", "customtools", "antigravity",
+    "nano-banana", "gemma",
+)
+
+# Google retires models over time (gemini-2.5-flash stopped accepting new users
+# while still being listed). Keep an ordered candidate list so a retired model
+# can be skipped at call time instead of taking the whole fallback provider down.
+_GEMINI_CANDIDATES: List[str] = []
+_GEMINI_MODEL_NAME: Optional[str] = None
+
+
+def _rank_gemini_models(available: List[str]) -> List[str]:
+    usable = [n for n in available if not any(bad in n.lower() for bad in _MODEL_NAME_DENYLIST)]
+    ranked: List[str] = []
+    for pref in PREFERRED_MODELS:
+        for name in usable:
+            if pref in name and name not in ranked:
+                ranked.append(name)
+    # Anything usable but unranked goes last, so a brand-new model still works.
+    ranked.extend(n for n in usable if n not in ranked)
+    return ranked
+
 
 if api_key:
     try:
         genai.configure(api_key=api_key)
         available = [m.name for m in genai.list_models()
                      if "generateContent" in m.supported_generation_methods]
-        chosen = None
-        for pref in PREFERRED_MODELS:
-            for avail in available:
-                if pref in avail:
-                    chosen = avail
-                    break
-            if chosen:
-                break
-        if not chosen and available:
-            chosen = available[0]
-        if chosen:
-            model = genai.GenerativeModel(chosen)
-            print(f"INFO: Gemini fallback model: {chosen}")
+        _GEMINI_CANDIDATES = _rank_gemini_models(available)
+        if _GEMINI_CANDIDATES:
+            _GEMINI_MODEL_NAME = _GEMINI_CANDIDATES[0]
+            model = genai.GenerativeModel(_GEMINI_MODEL_NAME)
+            print(f"INFO: Gemini fallback model: {_GEMINI_MODEL_NAME} "
+                  f"({len(_GEMINI_CANDIDATES)} candidates available)")
         else:
             print("WARNING: No Gemini generateContent-capable model found")
     except Exception as e:
         print("WARNING: Gemini model init failed:", repr(e))
 else:
     print("WARNING: GOOGLE_API_KEY missing in backend/.env")
+
+
+def _is_model_unavailable_error(err: Exception) -> bool:
+    """Whether the error means 'this model cannot be used', not 'call failed'."""
+    text = f"{type(err).__name__} {err}".lower()
+    return any(marker in text for marker in (
+        "notfound", "not found", "no longer available", "is not supported",
+        "permissiondenied", "permission denied", "does not exist",
+        "deprecated", "unsupported",
+    ))
+
+
+def _record_llm_error(message: str) -> None:
+    global _LAST_LLM_ERROR
+    _LAST_LLM_ERROR = message
+
+
+def _is_quota_error(err: Exception) -> bool:
+    """Whether the provider refused because a rate/quota limit was hit."""
+    text = f"{type(err).__name__} {err}".lower()
+    return any(marker in text for marker in (
+        "resourceexhausted", "resource_exhausted", "quota", "rate limit",
+        "ratelimit", "too many requests", "429",
+    ))
+
+
+def _is_provider_timeout(err: Exception) -> bool:
+    """Whether the provider ran out of time rather than failing outright.
+
+    The SDK raises DeadlineExceeded when the per-request deadline expires;
+    that means the same thing to a user as our own timeout, so it is funnelled
+    into the same handling instead of leaking a raw exception repr into the
+    reading ("API fallback activated: DeadlineExceeded(...)").
+    """
+    text = f"{type(err).__name__} {err}".lower()
+    return any(marker in text for marker in (
+        "deadlineexceeded", "deadline exceeded", "deadline expired",
+        "timeout", "timed out", "504",
+    ))
+
+
+def _advance_gemini_model(retire: bool = True) -> bool:
+    """Move to the next Gemini candidate.
+
+    retire=True  -> the model is unusable (withdrawn/denied); drop it entirely.
+    retire=False -> the model is only temporarily exhausted (quota); rotate it
+                    to the back of the queue so it can be used again later.
+
+    Returns True when another model is now active.
+    """
+    global model, _GEMINI_MODEL_NAME, _GEMINI_CANDIDATES
+
+    current = _GEMINI_MODEL_NAME
+    remaining = [n for n in _GEMINI_CANDIDATES if n != current]
+    if not retire and current:
+        remaining.append(current)          # keep it, just try it last
+    _GEMINI_CANDIDATES = remaining
+
+    if not _GEMINI_CANDIDATES or _GEMINI_CANDIDATES[0] == current:
+        model = None if retire else model
+        if retire:
+            _GEMINI_MODEL_NAME = None
+            print("WARNING: no usable Gemini model left")
+        return False
+
+    _GEMINI_MODEL_NAME = _GEMINI_CANDIDATES[0]
+    model = genai.GenerativeModel(_GEMINI_MODEL_NAME)
+    print(f"INFO: switched Gemini model to {_GEMINI_MODEL_NAME}")
+    return True
 
 app = FastAPI()
 
@@ -1110,6 +1291,10 @@ AUTH_TOKEN_TTL_SECONDS = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", str(30 * 24 * 3
 _PBKDF2_ITERATIONS = 200_000
 
 
+# How many saved readings to keep per account (oldest are pruned).
+KUNDLI_HISTORY_LIMIT = int(os.getenv("KUNDLI_HISTORY_LIMIT", "20"))
+
+
 def _auth_db() -> sqlite3.Connection:
     conn = sqlite3.connect(AUTH_DB_PATH)
     conn.execute(
@@ -1121,8 +1306,70 @@ def _auth_db() -> sqlite3.Connection:
             created_at TEXT NOT NULL
         )"""
     )
+    # Saved kundli readings, so a user's reports follow them across devices
+    # instead of living only in that browser's localStorage.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS kundli_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            identifier TEXT NOT NULL,
+            title TEXT NOT NULL,
+            person_name TEXT NOT NULL,
+            dob TEXT NOT NULL,
+            tob TEXT NOT NULL,
+            place TEXT NOT NULL,
+            language TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reports_identifier "
+        "ON kundli_reports (identifier, created_at DESC)"
+    )
     conn.commit()
     return conn
+
+
+def _save_kundli_report(identifier: str, user: "UserInput", payload: dict) -> None:
+    """Persist a reading for this account, pruning to KUNDLI_HISTORY_LIMIT.
+
+    Never raises: a storage problem must not fail the user's reading.
+    """
+    if not identifier or not isinstance(payload, dict):
+        return
+    conn = _auth_db()
+    try:
+        conn.execute(
+            """INSERT INTO kundli_reports
+               (identifier, title, person_name, dob, tob, place, language, payload, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                identifier,
+                str(payload.get("title", "Trividha Kundli Vishleshan"))[:200],
+                str(user.first_name or "")[:120],
+                str(user.dob or ""),
+                str(user.tob or ""),
+                str(user.place or "")[:200],
+                str(user.language or "hi"),
+                json.dumps(payload, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.execute(
+            """DELETE FROM kundli_reports
+               WHERE identifier = ?
+                 AND id NOT IN (
+                     SELECT id FROM kundli_reports
+                     WHERE identifier = ?
+                     ORDER BY id DESC LIMIT ?
+                 )""",
+            (identifier, identifier, KUNDLI_HISTORY_LIMIT),
+        )
+        conn.commit()
+    except Exception as e:
+        print("HISTORY SAVE WARNING:", repr(e))
+    finally:
+        conn.close()
 
 
 def _hash_password(password: str, salt: Optional[str] = None):
@@ -1163,13 +1410,56 @@ def _verify_token(token: str) -> Optional[str]:
         return None
 
 
+# ─── Rate limiting primitives ────────────────────────────────────────────────
+# Sliding-window counters kept in memory, keyed by "<bucket>:<client ip>".
+# RATE_LIMIT_PER_MINUTE guards the heavy astrology/market endpoints;
+# AUTH_RATE_LIMIT_PER_MINUTE guards credential endpoints against brute force.
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+AUTH_RATE_LIMIT_PER_MINUTE = int(os.getenv("AUTH_RATE_LIMIT_PER_MINUTE", "10"))
+_RATE_BUCKET: Dict[str, List[float]] = {}
+_RATE_BUCKET_MAX_KEYS = 10_000
+
+
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else "unknown") or "unknown"
+
+
+def _enforce_rate_limit(bucket_name: str, request: Request, limit_per_minute: int,
+                        message: str) -> None:
+    if limit_per_minute <= 0:
+        return
+
+    now = time.time()
+    window_start = now - 60.0
+    key = f"{bucket_name}:{_client_ip(request)}"
+
+    # Drop fully-expired keys so the map cannot grow without bound.
+    if len(_RATE_BUCKET) > _RATE_BUCKET_MAX_KEYS:
+        for stale_key in [k for k, v in _RATE_BUCKET.items() if not v or v[-1] < window_start]:
+            _RATE_BUCKET.pop(stale_key, None)
+
+    bucket = [t for t in _RATE_BUCKET.get(key, []) if t >= window_start]
+    if len(bucket) >= limit_per_minute:
+        raise HTTPException(status_code=429, detail=message)
+    bucket.append(now)
+    _RATE_BUCKET[key] = bucket
+
+
+def auth_rate_limit(request: Request) -> None:
+    """Throttle credential endpoints so passwords cannot be brute-forced."""
+    _enforce_rate_limit(
+        "auth", request, AUTH_RATE_LIMIT_PER_MINUTE,
+        "Bahut zyada login attempts. Kripya ek minute baad try karein.",
+    )
+
+
 class AuthInput(BaseModel):
     identifier: str
     password: str
 
 
 @app.post("/auth/signup")
-async def auth_signup(payload: AuthInput):
+async def auth_signup(payload: AuthInput, _rl: None = Depends(auth_rate_limit)):
     identifier = str(payload.identifier or "").strip().lower()
     password = str(payload.password or "")
     if not identifier or not password:
@@ -1197,7 +1487,7 @@ async def auth_signup(payload: AuthInput):
 
 
 @app.post("/auth/login")
-async def auth_login(payload: AuthInput):
+async def auth_login(payload: AuthInput, _rl: None = Depends(auth_rate_limit)):
     identifier = str(payload.identifier or "").strip().lower()
     password = str(payload.password or "")
     if not identifier or not password:
@@ -1221,8 +1511,19 @@ async def auth_login(payload: AuthInput):
 
 
 @app.get("/auth/me")
-async def auth_me(token: str = ""):
-    identifier = _verify_token(token)
+async def auth_me(authorization: Optional[str] = Header(None), token: str = ""):
+    """Verify the caller's session.
+
+    The token is read from the `Authorization: Bearer <token>` header. The
+    legacy `?token=` query parameter still works for backwards compatibility,
+    but it is discouraged: query strings land in server logs, proxy logs and
+    browser history.
+    """
+    header_token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        header_token = authorization[7:].strip()
+
+    identifier = _verify_token(header_token or token)
     if not identifier:
         return {"authenticated": False}
     return {"authenticated": True, "identifier": identifier}
@@ -1233,8 +1534,6 @@ async def auth_me(token: str = ""):
 # market endpoints. Set AUTH_ENFORCE=false to allow anonymous access (e.g. for
 # local testing). RATE_LIMIT_PER_MINUTE caps requests per client IP (0 disables).
 AUTH_ENFORCE = os.getenv("AUTH_ENFORCE", "true").strip().lower() in {"1", "true", "yes", "on"}
-RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
-_RATE_BUCKET: Dict[str, List[float]] = {}
 
 
 def require_user(authorization: Optional[str] = Header(None)) -> Optional[str]:
@@ -1251,17 +1550,11 @@ def require_user(authorization: Optional[str] = Header(None)) -> Optional[str]:
 
 
 def rate_limit(request: Request) -> None:
-    """FastAPI dependency: simple in-memory sliding-window limit per client IP."""
-    if RATE_LIMIT_PER_MINUTE <= 0:
-        return
-    client_ip = (request.client.host if request.client else "unknown") or "unknown"
-    now = time.time()
-    window_start = now - 60.0
-    bucket = [t for t in _RATE_BUCKET.get(client_ip, []) if t >= window_start]
-    if len(bucket) >= RATE_LIMIT_PER_MINUTE:
-        raise HTTPException(status_code=429, detail="Too many requests. Please wait a minute and try again.")
-    bucket.append(now)
-    _RATE_BUCKET[client_ip] = bucket
+    """FastAPI dependency: sliding-window limit per client IP on heavy endpoints."""
+    _enforce_rate_limit(
+        "api", request, RATE_LIMIT_PER_MINUTE,
+        "Too many requests. Please wait a minute and try again.",
+    )
 
 
 async def _geocode_place(place_name: str):
@@ -1310,10 +1603,37 @@ class TeziMandiInput(BaseModel):
     lng: Optional[float] = None
 
 
+# Roman-script Hindi words used to tell Hinglish apart from English.
+#
+# The original list was too thin for real questions: "Mera career kaisa
+# rahega?", "Naukri milegi ya nahi?" and "Paisa kitna aayega?" all scored below
+# the 2-marker threshold and were answered in English. Entries below are chosen
+# to have no common English homograph — deliberately excluded are "hi", "tab",
+# "na" and "so", which are ordinary English words.
 ROMAN_HINDI_MARKERS = {
-    "kya", "kaise", "kab", "kyu", "kyun", "mera", "meri", "mere", "mujhe", "aap",
-    "hai", "hain", "ho", "hoga", "hogi", "kar", "karu", "karun", "nahi", "nahin",
-    "agar", "aur", "par", "ke", "ki", "ko", "se", "mein", "main", "ka", "tha", "thi"
+    # pronouns / particles
+    "mera", "meri", "mere", "mujhe", "mujhko", "aap", "aapka", "aapki", "aapke",
+    "hum", "hamara", "hamari", "hamare", "tum", "tumhara", "unka", "unki", "uska",
+    "uski", "apna", "apni", "apne", "iska", "iski", "isme", "usme",
+    # question words
+    "kya", "kaise", "kaisa", "kaisi", "kab", "kyu", "kyun", "kyunki",
+    "kitna", "kitni", "kitne", "kaun", "kaunsa", "kahan", "kidhar",
+    # verbs / auxiliaries
+    "hai", "hain", "hoga", "hogi", "honge", "hona", "hone", "tha", "thi", "the",
+    "kar", "karu", "karun", "karein", "karna", "karne", "karega", "karegi", "karenge",
+    "milega", "milegi", "milenge", "aayega", "aayegi", "banega", "banegi",
+    "rahega", "rahegi", "rahenge", "jayega", "jayegi", "lagega", "lagegi",
+    "dega", "degi", "sakta", "sakti", "sakte", "chahiye", "batao", "bataye",
+    "bataiye", "dijiye", "hoye",
+    # connectors
+    "aur", "agar", "lekin", "magar", "phir", "abhi", "baad", "pehle", "jaldi",
+    "kabhi", "koi", "kuch", "sabhi", "jab", "toh", "bhi", "nahi", "nahin", "ya",
+    "mein", "yahan", "wahan", "waise", "jaise",
+    # domain vocabulary this app sees constantly
+    "shaadi", "vivah", "naukri", "nokri", "paisa", "paise", "dhan", "ghar",
+    "parivar", "sehat", "swasthya", "kismat", "bhagya", "kundli", "rashi",
+    "graha", "dasha", "upay", "jeevan", "pyar", "prem", "santan", "bacche",
+    "videsh", "vyapar", "padhai", "safalta", "samay",
 }
 
 
@@ -1355,17 +1675,28 @@ def _style_instruction(question_style: str) -> str:
 
 
 def _answer_matches_style(answer: str, question_style: str) -> bool:
+    """Whether an answer is written predominantly in the requested script.
+
+    Judged by ratio, not by presence: a Hindi answer legitimately contains the
+    Latin self-reference "Guru Ji" and Latin planet names echoed from the
+    computed chart, so requiring zero Latin characters forced a pointless
+    (and slow) rewrite call on nearly every Hindi answer.
+    """
     text = str(answer or "")
-    has_dev = bool(re.search(r"[\u0900-\u097F]", text))
-    has_lat = bool(re.search(r"[A-Za-z]", text))
     style = str(question_style or "").lower()
 
     if style == "hi":
-        return has_dev and not has_lat
-    if style == "en":
-        return has_lat and not has_dev
-    if style == "hinglish":
-        return has_lat and not has_dev
+        share = _devanagari_share(text)
+        return True if share is None else share >= _DEVANAGARI_MIN_SHARE
+
+    if style in {"en", "hinglish"}:
+        dev = len(re.findall(r"[\u0900-\u097F]", text))
+        lat = len(re.findall(r"[A-Za-z]", text))
+        total = dev + lat
+        if total < 12:
+            return True
+        return (lat / total) >= _DEVANAGARI_MIN_SHARE
+
     return True
 
 
@@ -1392,6 +1723,7 @@ async def generate_content_with_timeout(prompt: str, generation_config=None, tim
                 def __init__(self, t): self.text = t
             return _Resp(result_text)
         except Exception as _oe:
+            _record_llm_error(f"openai:{OPENAI_MODEL} {str(_oe)[:200]}")
             print("WARNING: OpenAI call failed, falling back to Gemini:", repr(_oe))
 
     # --- Gemini fallback ---
@@ -1402,10 +1734,56 @@ async def generate_content_with_timeout(prompt: str, generation_config=None, tim
     if generation_config is not None:
         kwargs["generation_config"] = generation_config
 
-    return await asyncio.wait_for(
-        asyncio.to_thread(model.generate_content, prompt, **kwargs),
-        timeout=effective_timeout,
-    )
+    # A listed model can still be withdrawn for this account, or have burned
+    # through its daily quota. Walk down the candidate list instead of failing
+    # the whole request.
+    #
+    # request_options caps the SDK's own retry/backoff loop. Without it a 429
+    # made the client retry internally for ~164s before surfacing anything,
+    # so the user saw a misleading "timeout" long after the real cause (quota)
+    # was already known.
+    deadline = time.monotonic() + effective_timeout
+    last_error: Optional[Exception] = None
+
+    for _ in range(_GEMINI_MAX_MODEL_ATTEMPTS):
+        active = model
+        if active is None:
+            break
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 1.0:
+            raise asyncio.TimeoutError()
+
+        call_kwargs = dict(kwargs)
+        call_kwargs["request_options"] = {"timeout": max(5.0, remaining)}
+
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(active.generate_content, prompt, **call_kwargs),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            raise
+        except Exception as gen_err:
+            last_error = gen_err
+            # A provider-side deadline is our timeout by another name.
+            if _is_provider_timeout(gen_err) and not _is_quota_error(gen_err):
+                _record_llm_error(f"{_GEMINI_MODEL_NAME} deadline exceeded")
+                raise asyncio.TimeoutError() from gen_err
+            quota = _is_quota_error(gen_err)
+            unusable = _is_model_unavailable_error(gen_err)
+            if not (quota or unusable):
+                raise
+            reason = "quota exhausted" if quota else "unusable"
+            _record_llm_error(f"{_GEMINI_MODEL_NAME} {reason}: {str(gen_err)[:200]}")
+            print(f"WARNING: Gemini model {_GEMINI_MODEL_NAME} {reason}: {str(gen_err)[:160]}")
+            # Quota resets, withdrawal does not — retire only the latter.
+            if not _advance_gemini_model(retire=not quota):
+                break
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Guru Ji is currently unavailable — no usable Gemini model")
 
 
 def _planet_strength_score(planet_name: str, pdata: dict, house_num: Optional[int]) -> int:
@@ -1429,35 +1807,135 @@ def _planet_strength_score(planet_name: str, pdata: dict, house_num: Optional[in
     return score
 
 
-def _product_karaka_planets(product: str) -> List[str]:
-    p = (product or "").strip().lower()
-    mapping = {
-        "gold": ["Venus", "Jupiter", "Moon"],
-        "silver": ["Moon", "Venus", "Mercury"],
-        "crude": ["Mars", "Saturn", "Rahu"],
-        "crude oil": ["Mars", "Saturn", "Rahu"],
-        "natural gas": ["Mercury", "Rahu", "Moon"],
-        "copper": ["Mars", "Mercury", "Saturn"],
-        "zinc": ["Saturn", "Mars", "Mercury"],
-        "aluminium": ["Saturn", "Mars", "Mercury"],
-        "cotton": ["Moon", "Venus", "Jupiter"],
-        "soybean": ["Jupiter", "Moon", "Mercury"],
-        "wheat": ["Jupiter", "Sun", "Moon"],
-        "rice": ["Moon", "Venus", "Jupiter"],
-        "sugar": ["Venus", "Moon", "Mercury"],
-        "chana": ["Jupiter", "Mercury", "Moon"],
-        "nifty": ["Sun", "Mercury", "Jupiter", "Rahu"],
-        "banknifty": ["Sun", "Mercury", "Jupiter", "Saturn"],
-        "bank nifty": ["Sun", "Mercury", "Jupiter", "Saturn"],
-        "equity": ["Sun", "Mercury", "Jupiter", "Rahu"],
-        "crypto": ["Rahu", "Mercury", "Mars"],
-        "bitcoin": ["Rahu", "Mercury", "Mars"],
-    }
+# --- Market instrument table -------------------------------------------------
+# One row per tradable instrument holding EVERYTHING about it: the aliases a
+# user might type, the Yahoo Finance symbols, the karaka planets, and the real
+# currency and unit the symbol is quoted in.
+#
+# These facts used to live in three separate dicts that could (and did)
+# disagree: "Bank Nifty" resolved to the Nifty 50 symbol because the substring
+# "nifty" was tested first, and every instrument was labelled INR / 10g / kg
+# regardless of what the exchange actually quotes.
+#
+#   currency : currency the symbol is quoted in
+#   unit     : human label for one quoted unit
+#   unit_kg  : mass of one quoted unit in kg (None when not mass-based)
+#   cents    : True when the symbol quotes in 1/100 of the currency
+#              (CBOT/ICE grains and softs quote in US cents, not dollars)
+_MARKET_INSTRUMENTS: List[dict] = [
+    # --- Indian indices (must precede the bare "nifty" alias) ---
+    {"aliases": ["bank nifty", "banknifty", "nifty bank"], "symbols": ["^NSEBANK"],
+     "karakas": ["Sun", "Mercury", "Jupiter", "Saturn"],
+     "currency": "INR", "unit": "index point", "unit_kg": None, "cents": False},
+    {"aliases": ["nifty 50", "nifty50", "nifty"], "symbols": ["^NSEI"],
+     "karakas": ["Sun", "Mercury", "Jupiter", "Rahu"],
+     "currency": "INR", "unit": "index point", "unit_kg": None, "cents": False},
+    {"aliases": ["sensex", "bse"], "symbols": ["^BSESN"],
+     "karakas": ["Sun", "Mercury", "Jupiter", "Rahu"],
+     "currency": "INR", "unit": "index point", "unit_kg": None, "cents": False},
 
-    for key, planets in mapping.items():
-        if key in p:
-            return planets
-    return ["Mercury", "Moon", "Jupiter"]
+    # --- Currency pairs (quoted as INR per 1 foreign unit) ---
+    {"aliases": ["usdinr", "usd/inr", "dollar rupee"], "symbols": ["USDINR=X"],
+     "karakas": ["Sun", "Mercury", "Saturn"],
+     "currency": "INR", "unit": "USD", "unit_kg": None, "cents": False},
+    {"aliases": ["eurinr", "eur/inr"], "symbols": ["EURINR=X"],
+     "karakas": ["Venus", "Mercury", "Saturn"],
+     "currency": "INR", "unit": "EUR", "unit_kg": None, "cents": False},
+    {"aliases": ["jpyinr", "jpy/inr"], "symbols": ["JPYINR=X"],
+     "karakas": ["Moon", "Mercury", "Saturn"],
+     "currency": "INR", "unit": "JPY", "unit_kg": None, "cents": False},
+
+    # --- Precious metals: COMEX quotes USD per TROY OUNCE (31.1034768 g) ---
+    {"aliases": ["gold", "sona"], "symbols": ["GC=F", "XAUUSD=X"],
+     "karakas": ["Venus", "Jupiter", "Moon"],
+     "currency": "USD", "unit": "troy ounce", "unit_kg": 0.0311034768, "cents": False},
+    {"aliases": ["silver", "chandi"], "symbols": ["SI=F", "XAGUSD=X"],
+     "karakas": ["Moon", "Venus", "Mercury"],
+     "currency": "USD", "unit": "troy ounce", "unit_kg": 0.0311034768, "cents": False},
+
+    # --- Energy ---
+    {"aliases": ["crude oil", "crude", "wti", "brent"], "symbols": ["CL=F", "BZ=F"],
+     "karakas": ["Mars", "Saturn", "Rahu"],
+     "currency": "USD", "unit": "barrel", "unit_kg": None, "cents": False},
+    {"aliases": ["natural gas", "gas"], "symbols": ["NG=F"],
+     "karakas": ["Mercury", "Rahu", "Moon"],
+     "currency": "USD", "unit": "MMBtu", "unit_kg": None, "cents": False},
+
+    # --- Base metals ---
+    {"aliases": ["copper", "tamba"], "symbols": ["HG=F"],
+     "karakas": ["Mars", "Mercury", "Saturn"],
+     "currency": "USD", "unit": "pound", "unit_kg": 0.45359237, "cents": False},
+    {"aliases": ["aluminium", "aluminum"], "symbols": ["ALI=F"],
+     "karakas": ["Saturn", "Mars", "Mercury"],
+     "currency": "USD", "unit": "tonne", "unit_kg": 1000.0, "cents": False},
+
+    # --- Agri: CBOT/ICE quote grains and softs in US CENTS ---
+    {"aliases": ["soybean", "soya"], "symbols": ["ZS=F"],
+     "karakas": ["Jupiter", "Moon", "Mercury"],
+     "currency": "USD", "unit": "bushel", "unit_kg": 27.2155, "cents": True},
+    {"aliases": ["wheat", "gehun"], "symbols": ["ZW=F"],
+     "karakas": ["Jupiter", "Sun", "Moon"],
+     "currency": "USD", "unit": "bushel", "unit_kg": 27.2155, "cents": True},
+    {"aliases": ["corn", "maize", "makka"], "symbols": ["ZC=F"],
+     "karakas": ["Sun", "Jupiter", "Moon"],
+     "currency": "USD", "unit": "bushel", "unit_kg": 25.4012, "cents": True},
+    {"aliases": ["cotton", "kapas"], "symbols": ["CT=F"],
+     "karakas": ["Moon", "Venus", "Jupiter"],
+     "currency": "USD", "unit": "pound", "unit_kg": 0.45359237, "cents": True},
+    {"aliases": ["sugar", "cheeni"], "symbols": ["SB=F"],
+     "karakas": ["Venus", "Moon", "Mercury"],
+     "currency": "USD", "unit": "pound", "unit_kg": 0.45359237, "cents": True},
+    {"aliases": ["rice", "chawal"], "symbols": ["ZR=F"],
+     "karakas": ["Moon", "Venus", "Jupiter"],
+     "currency": "USD", "unit": "cwt (100 lb)", "unit_kg": 45.359237, "cents": False},
+    {"aliases": ["coffee"], "symbols": ["KC=F"],
+     "karakas": ["Mercury", "Venus", "Mars"],
+     "currency": "USD", "unit": "pound", "unit_kg": 0.45359237, "cents": True},
+
+    # --- Crypto ---
+    {"aliases": ["bitcoin", "btc", "crypto"], "symbols": ["BTC-USD"],
+     "karakas": ["Rahu", "Mercury", "Mars"],
+     "currency": "USD", "unit": "BTC", "unit_kg": None, "cents": False},
+    {"aliases": ["ethereum", "eth"], "symbols": ["ETH-USD"],
+     "karakas": ["Rahu", "Mercury", "Saturn"],
+     "currency": "USD", "unit": "ETH", "unit_kg": None, "cents": False},
+]
+
+_DEFAULT_INSTRUMENT = {
+    "aliases": [], "symbols": [], "karakas": ["Mercury", "Moon", "Jupiter"],
+    "currency": "", "unit": "unit", "unit_kg": None, "cents": False,
+}
+
+
+def _resolve_instrument(product: str) -> dict:
+    """Match a typed product name to an instrument row.
+
+    Aliases are matched LONGEST FIRST so "bank nifty" cannot be swallowed by
+    the shorter "nifty" alias.
+    """
+    p = " ".join(str(product or "").strip().lower().split())
+    if not p:
+        return dict(_DEFAULT_INSTRUMENT)
+
+    best: Optional[dict] = None
+    best_len = 0
+    for row in _MARKET_INSTRUMENTS:
+        for alias in row["aliases"]:
+            if alias in p and len(alias) > best_len:
+                best, best_len = row, len(alias)
+    if best:
+        return best
+
+    # Unknown name: if it looks like a ticker, try it verbatim. Currency and
+    # unit stay blank so an unknown quote is never mislabelled.
+    fallback = dict(_DEFAULT_INSTRUMENT)
+    if re.fullmatch(r"[A-Za-z0-9^=._-]{2,16}", p):
+        fallback["symbols"] = [p.upper()]
+    return fallback
+
+
+def _product_karaka_planets(product: str) -> List[str]:
+    return list(_resolve_instrument(product)["karakas"])
 
 
 def _market_prediction_from_engine(transit_chart: dict, birth_chart: Optional[dict] = None) -> dict:
@@ -1537,7 +2015,7 @@ def _market_prediction_from_engine(transit_chart: dict, birth_chart: Optional[di
     }
 
 
-def _market_past_from_engine(target_day: datetime.date, transit_chart: dict, birth_chart: Optional[dict]) -> dict:
+def _market_past_from_engine(target_day: _date, transit_chart: dict, birth_chart: Optional[dict]) -> dict:
     logic = (ENGINE_CONFIG.get("market_past", {}) or {}).get("logic", []) or []
     tph = transit_chart.get("planet_houses", {}) if isinstance(transit_chart, dict) else {}
     dasha_lord = "Unknown"
@@ -1772,94 +2250,107 @@ def _health_risk_note(house_num: int, lord: str, occupants: List[str], language:
 
 
 def _product_market_symbols(product: str) -> List[str]:
-    p = (product or "").strip().lower()
-    mapping = {
-        "gold": ["GC=F", "XAUUSD=X"],
-        "silver": ["SI=F", "XAGUSD=X"],
-        "crude oil": ["CL=F", "BZ=F"],
-        "crude": ["CL=F", "BZ=F"],
-        "natural gas": ["NG=F"],
-        "copper": ["HG=F"],
-        "aluminium": ["ALI=F"],
-        "zinc": ["ZNC=F"],
-        "soybean": ["ZS=F"],
-        "wheat": ["ZW=F"],
-        "sugar": ["SB=F"],
-        "rice": ["ZR=F"],
-        "nifty": ["^NSEI"],
-        "bank nifty": ["^NSEBANK"],
-        "banknifty": ["^NSEBANK"],
-        "sensex": ["^BSESN"],
-        "bitcoin": ["BTC-USD"],
-    }
-
-    for key, symbols in mapping.items():
-        if key in p:
-            return symbols
-
-    # If user directly gives a known ticker-like value, try it as-is.
-    if re.fullmatch(r"[A-Za-z0-9^=._-]{2,16}", product.strip()):
-        return [product.strip().upper()]
-
-    return []
+    return list(_resolve_instrument(product)["symbols"])
 
 
 def _price_unit_profile(product: str) -> dict:
-    p = (product or "").strip().lower()
-
-    # Unit assumptions are used only for human-readable display.
-    if "gold" in p:
-        return {"currency": "INR", "base_unit": "10g", "base_grams": 10.0}
-    if "silver" in p:
-        return {"currency": "INR", "base_unit": "kg", "base_grams": 1000.0}
-    if any(x in p for x in ["wheat", "rice", "sugar", "soybean", "chana", "cotton"]):
-        return {"currency": "INR", "base_unit": "quintal", "base_grams": 100000.0}
-    if any(x in p for x in ["crude", "natural gas", "copper", "zinc", "aluminium"]):
-        return {"currency": "INR", "base_unit": "unit", "base_grams": None}
-    return {"currency": "INR", "base_unit": "unit", "base_grams": None}
+    """Real quote profile for a product (currency + unit as the exchange quotes it)."""
+    inst = _resolve_instrument(product)
+    return {
+        "currency": inst["currency"],
+        "base_unit": inst["unit"],
+        "unit_kg": inst["unit_kg"],
+        "cents": inst["cents"],
+    }
 
 
-def _price_breakdown_inr(close_rate: Optional[float], product: str) -> dict:
+def _price_breakdown(close_rate: Optional[float], product: str,
+                     usd_inr_rate: Optional[float] = None) -> dict:
+    """Human-readable price breakdown in the instrument's OWN currency and unit.
+
+    The previous version labelled every instrument as INR and assumed gold was
+    quoted per 10 g and silver per kg. In reality the Yahoo symbols quote COMEX
+    gold and silver in USD per troy ounce, CBOT grains in US cents per bushel,
+    copper and sugar in US cents/USD per pound, and the Indian indices in index
+    points. So the headline figure was wrong in both currency and magnitude,
+    and the derived per-gram / per-kg / per-quintal rows were meaningless.
+
+    Mass-derived rows are now emitted only when the unit really is a mass, and
+    an indicative INR value is added when an FX rate is supplied.
+    """
     profile = _price_unit_profile(product)
+    currency = profile["currency"]
+    base_unit = profile["base_unit"]
+    unit_kg = profile["unit_kg"]
+
+    empty = {
+        "currency": currency,
+        "base_unit": base_unit,
+        "price": None,
+        "per_gram": None,
+        "per_kg": None,
+        "per_quintal": None,
+        "inr_per_base_unit": None,
+        "inr_per_gram": None,
+        "inr_per_kg": None,
+        "inr_per_quintal": None,
+        "fx_usd_inr": usd_inr_rate,
+    }
     if close_rate is None:
-        return {
-            "currency": profile.get("currency", "INR"),
-            "base_unit": profile.get("base_unit", "unit"),
-            "price": None,
-            "per_gram": None,
-            "per_kg": None,
-            "per_quintal": None,
-        }
+        return empty
 
-    base_grams = profile.get("base_grams")
-    price = float(close_rate)
-    per_gram = None
-    per_kg = None
-    per_quintal = None
+    # CBOT/ICE contracts quote in cents; convert to whole currency units.
+    price = float(close_rate) / 100.0 if profile["cents"] else float(close_rate)
 
-    if isinstance(base_grams, (int, float)) and base_grams > 0:
-        per_gram = price / float(base_grams)
-        per_kg = per_gram * 1000.0
-        per_quintal = per_kg * 100.0
+    per_gram = per_kg = per_quintal = None
+    if isinstance(unit_kg, (int, float)) and unit_kg > 0:
+        per_kg = price / float(unit_kg)
+        per_gram = per_kg / 1000.0
+        per_quintal = per_kg * 100.0          # 1 quintal = 100 kg
+
+    def _to_inr(value):
+        if value is None:
+            return None
+        if currency == "INR":
+            return round(value, 4)
+        if currency == "USD" and usd_inr_rate:
+            return round(value * float(usd_inr_rate), 4)
+        return None
 
     return {
-        "currency": profile.get("currency", "INR"),
-        "base_unit": profile.get("base_unit", "unit"),
+        "currency": currency,
+        "base_unit": base_unit,
         "price": round(price, 4),
         "per_gram": round(per_gram, 4) if per_gram is not None else None,
         "per_kg": round(per_kg, 4) if per_kg is not None else None,
         "per_quintal": round(per_quintal, 4) if per_quintal is not None else None,
+        "inr_per_base_unit": _to_inr(price),
+        "inr_per_gram": _to_inr(per_gram),
+        "inr_per_kg": _to_inr(per_kg),
+        "inr_per_quintal": _to_inr(per_quintal),
+        "fx_usd_inr": round(float(usd_inr_rate), 4) if usd_inr_rate else None,
     }
 
 
-async def _fetch_historical_close(product: str, target_day: datetime.date) -> Optional[dict]:
+async def _fetch_usd_inr_rate(target_day: _date) -> Optional[float]:
+    """USD->INR close for (or just before) the given day; None if unavailable."""
+    ref = await _fetch_historical_close("usdinr", target_day)
+    if ref and isinstance(ref.get("close"), (int, float)):
+        return float(ref["close"])
+    return None
+
+
+async def _fetch_historical_close(product: str, target_day: _date) -> Optional[dict]:
     symbols = _product_market_symbols(product)
     if not symbols:
         return None
 
-    # Extend window to absorb non-trading days/holidays.
-    start_ts = int(datetime.combine(target_day - timedelta(days=10), datetime.min.time()).timestamp())
-    end_ts = int(datetime.combine(target_day + timedelta(days=2), datetime.min.time()).timestamp())
+    # Extend window to absorb non-trading days/holidays. Anchor to UTC so the
+    # window does not shift with the server's local timezone.
+    start_ts = int(datetime.combine(target_day - timedelta(days=10),
+                                    datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    end_ts = int(datetime.combine(target_day + timedelta(days=2),
+                                  datetime.min.time(), tzinfo=timezone.utc).timestamp())
 
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         for symbol in symbols:
@@ -1887,7 +2378,7 @@ async def _fetch_historical_close(product: str, target_day: datetime.date) -> Op
                 for ts, close in zip(timestamps, closes):
                     if close is None:
                         continue
-                    day = datetime.utcfromtimestamp(int(ts)).date()
+                    day = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
                     points.append((day, float(close)))
 
                 if not points:
@@ -1917,6 +2408,48 @@ async def _fetch_historical_close(product: str, target_day: datetime.date) -> Op
                 continue
 
     return None
+
+
+def _format_price_line(price_breakdown: dict, hi: bool) -> str:
+    """One line describing the close in its true currency and unit.
+
+    Prices are shown in the currency the exchange actually quotes; an indicative
+    INR conversion is appended for USD instruments (international price only —
+    it excludes Indian import duty, GST and local premium).
+    """
+    cur = price_breakdown.get("currency") or ""
+    unit = price_breakdown.get("base_unit") or "unit"
+    price = price_breakdown.get("price")
+    if price is None:
+        return ""
+
+    head = f"Closing figure: {cur} {price:,.2f} per {unit}." if cur else f"Closing figure: {price:,.2f} per {unit}."
+
+    parts = [head]
+    per_kg = price_breakdown.get("per_kg")
+    if per_kg is not None:
+        parts.append(
+            f"= {cur} {price_breakdown.get('per_gram'):,.2f}/gram, "
+            f"{cur} {per_kg:,.2f}/kg, "
+            f"{cur} {price_breakdown.get('per_quintal'):,.2f}/quintal."
+        )
+
+    inr_base = price_breakdown.get("inr_per_base_unit")
+    if inr_base is not None and cur != "INR":
+        fx = price_breakdown.get("fx_usd_inr")
+        inr_kg = price_breakdown.get("inr_per_kg")
+        inr_bit = f"Approx INR {inr_base:,.2f} per {unit}"
+        if inr_kg is not None:
+            inr_bit += f" (INR {price_breakdown.get('inr_per_gram'):,.2f}/gram, INR {inr_kg:,.2f}/kg)"
+        if fx:
+            inr_bit += f" at {fx:,.2f} USD/INR"
+        if hi:
+            inr_bit += ". Yeh international price hai - Indian retail rate me import duty, GST aur local premium alag se judta hai."
+        else:
+            inr_bit += ". This is the international price; Indian retail adds import duty, GST and local premium."
+        parts.append(inr_bit)
+
+    return " ".join(parts)
 
 
 @app.post("/tezi-mandi")
@@ -2011,11 +2544,41 @@ async def tezi_mandi(
         f"final={engine_prediction.get('final_signal')}"
     )
 
-    volatility = "Low"
-    if "Rahu" in karaka_planets or "Mars" in karaka_planets:
-        volatility = "Medium"
-    if houses.get("Rahu") in {1, 8, 10, 11} or houses.get("Mars") in {1, 8, 10, 11}:
-        volatility = "High"
+    # Volatility from THIS product's own karakas and where they sit in the
+    # session transit chart. The previous rule checked only whether Rahu or
+    # Mars occupied any of houses 1/8/10/11 — with nine grahas over twelve
+    # houses that fired on most days, so every commodity read "High".
+    vol_points = 0
+    if "Rahu" in karaka_planets:
+        vol_points += 2
+    if "Mars" in karaka_planets:
+        vol_points += 1
+    if "Saturn" in karaka_planets:
+        vol_points += 1
+    for kp in karaka_planets:
+        if houses.get(kp) in {6, 8, 12}:      # dusthana placement
+            vol_points += 1
+    if houses.get("Moon") in {6, 8, 12}:      # afflicted Moon = choppy session
+        vol_points += 1
+
+    volatility = "High" if vol_points >= 4 else ("Medium" if vol_points >= 2 else "Low")
+
+    # --- Product tilt -------------------------------------------------------
+    # `score` above measures how well this commodity's karaka planets are
+    # placed. It used to be computed, printed into `drivers`, and then ignored:
+    # signal, confidence and probabilities came only from the transit engine,
+    # which takes no product argument. The result was that Gold, Silver, Crude
+    # and Nifty returned an identical reading for any given date.
+    #
+    # The engine still gates direction (engine_config.json is explicit:
+    # "multi-layer confluence only"). The karaka score now modulates conviction
+    # and tilts the probability split, so the product genuinely matters.
+    _karaka_span = max(1.0, 2.0 * len(karaka_planets) + 3.0)
+    karaka_bias = max(-1.0, min(1.0, float(score) / _karaka_span))
+    drivers.append(
+        f"Karaka strength score for {product}: {score:+d} => bias {karaka_bias:+.2f} "
+        f"(planets: {', '.join(karaka_planets)})"
+    )
 
     signal = str(engine_prediction.get("final_signal", "NO_TRADE"))
     trend_signal = str(engine_prediction.get("trend_signal", "NEUTRAL"))
@@ -2035,7 +2598,16 @@ async def tezi_mandi(
         short_hi = f"{product} mein abhi NO_TRADE ka sanket hai."
         short_en = f"No-trade signal for {product}."
 
-    confidence = int(round(max(0.0, min(1.0, float(engine_prediction.get("confidence", 0.0)))) * 100))
+    base_confidence = max(0.0, min(1.0, float(engine_prediction.get("confidence", 0.0)))) * 100.0
+
+    # Conviction rises when the product's karakas agree with the engine's
+    # direction and falls when they contradict it.
+    _engine_dir = 1 if signal in {"BUY", "STRONG_BUY"} else (-1 if signal == "SELL" else 0)
+    if _engine_dir:
+        confidence = base_confidence + 12.0 * (_engine_dir * karaka_bias)
+    else:
+        confidence = base_confidence + 8.0 * abs(karaka_bias)
+    confidence = int(round(max(5.0, min(95.0, confidence))))
     next_check = (target_date + timedelta(days=7)).strftime("%Y-%m-%d")
 
     # Probabilities for forecast mode: Up / Neutral / Down.
@@ -2051,6 +2623,12 @@ async def tezi_mandi(
     else:
         up_prob = max(20, 30 - int(confidence * 0.05))
         down_prob = max(20, 30 - int(confidence * 0.05))
+
+    # Tilt the split toward the side this product's karakas favour, so two
+    # commodities on the same date no longer show identical probabilities.
+    _tilt = int(round(10.0 * karaka_bias))
+    up_prob = max(5, min(90, up_prob + _tilt))
+    down_prob = max(5, min(90, down_prob - _tilt))
 
     neutral_prob = 100 - up_prob - down_prob
     if neutral_prob < 8:
@@ -2114,8 +2692,17 @@ async def tezi_mandi(
         close_rate = market_ref.get("close") if market_ref else None
         ref_day = market_ref.get("session_date") if market_ref else target_day.strftime("%Y-%m-%d")
         prev_close = market_ref.get("prev_close") if market_ref else None
+        quote_symbol = market_ref.get("symbol") if market_ref else None
         phase_label = str((engine_past or {}).get("phase_label", "MIXED"))
-        price_breakdown = _price_breakdown_inr(close_rate, product)
+
+        # USD-quoted instruments also get an indicative INR figure so the number
+        # means something to an Indian user. It is a straight FX conversion of
+        # the international price — it is NOT the Indian retail/spot rate, which
+        # additionally carries import duty, GST and a local premium.
+        usd_inr = None
+        if _price_unit_profile(product)["currency"] == "USD":
+            usd_inr = await _fetch_usd_inr_rate(target_day)
+        price_breakdown = _price_breakdown(close_rate, product, usd_inr)
 
         change_pct = None
         change_abs = None
@@ -2147,16 +2734,10 @@ async def tezi_mandi(
                     movement_line = f"us din {abs(change_pct or 0):.2f}% neeche band hua."
                 else:
                     movement_line = "us din bazaar neutral (sthir) raha."
-                unit_line = (
-                    f"Closing figure: Rs {close_rate:.2f} per {price_breakdown.get('base_unit')}. "
-                    f"Approx: Rs {price_breakdown.get('per_gram'):.2f}/gram, "
-                    f"Rs {price_breakdown.get('per_kg'):.2f}/kg, "
-                    f"Rs {price_breakdown.get('per_quintal'):.2f}/quintal."
-                    if price_breakdown.get("per_gram") is not None else
-                    f"Closing figure: Rs {close_rate:.2f} per {price_breakdown.get('base_unit')}."
-                )
+                unit_line = _format_price_line(price_breakdown, hi=True)
+                sym_note = f" (source: {quote_symbol})" if quote_symbol else ""
                 summary = (
-                    f"{date_note}{product} ka closing rate {close_rate:.2f} tha, {movement_line} {unit_line} Past phase label: {phase_label}."
+                    f"{date_note}{product}{sym_note} ka closing rate {movement_line} {unit_line} Past phase label: {phase_label}."
                 )
             else:
                 summary = (
@@ -2178,16 +2759,10 @@ async def tezi_mandi(
                     movement_line = f"closed {abs(change_pct or 0):.2f}% down on that session."
                 else:
                     movement_line = "closed neutral (sideways) on that session."
-                unit_line = (
-                    f"Closing figure: Rs {close_rate:.2f} per {price_breakdown.get('base_unit')}. "
-                    f"Approx: Rs {price_breakdown.get('per_gram'):.2f}/gram, "
-                    f"Rs {price_breakdown.get('per_kg'):.2f}/kg, "
-                    f"Rs {price_breakdown.get('per_quintal'):.2f}/quintal."
-                    if price_breakdown.get("per_gram") is not None else
-                    f"Closing figure: Rs {close_rate:.2f} per {price_breakdown.get('base_unit')}."
-                )
+                unit_line = _format_price_line(price_breakdown, hi=False)
+                sym_note = f" (source: {quote_symbol})" if quote_symbol else ""
                 summary = (
-                    f"{date_note}{product} closing rate was {close_rate:.2f}; it {movement_line} {unit_line} Past phase label: {phase_label}."
+                    f"{date_note}{product}{sym_note} {movement_line} {unit_line} Past phase label: {phase_label}."
                 )
             else:
                 summary = (
@@ -2195,14 +2770,8 @@ async def tezi_mandi(
                     f"Astro signal: {display_signal_en}. Past phase label: {phase_label}."
                 )
     else:
-        price_breakdown = {
-            "currency": "INR",
-            "base_unit": _price_unit_profile(product).get("base_unit", "unit"),
-            "price": None,
-            "per_gram": None,
-            "per_kg": None,
-            "per_quintal": None,
-        }
+        price_breakdown = _price_breakdown(None, product)
+        quote_symbol = None
         summary = (
             f"{short_hi} Trend: {trend_signal}, Trigger: {trigger_signal}, Intraday: {intraday_signal}. Asthirta: {vol_hi_map.get(volatility, volatility)}. Vishwas star: {confidence}%. Agli samiksha: {next_check}."
             if hi_lang
@@ -2249,6 +2818,13 @@ async def tezi_mandi(
         "price_per_gram": price_breakdown.get("per_gram"),
         "price_per_kg": price_breakdown.get("per_kg"),
         "price_per_quintal": price_breakdown.get("per_quintal"),
+        "price_inr_per_base_unit": price_breakdown.get("inr_per_base_unit"),
+        "price_inr_per_gram": price_breakdown.get("inr_per_gram"),
+        "price_inr_per_kg": price_breakdown.get("inr_per_kg"),
+        "price_inr_per_quintal": price_breakdown.get("inr_per_quintal"),
+        "price_fx_usd_inr": price_breakdown.get("fx_usd_inr"),
+        "quote_symbol": quote_symbol,
+        "karaka_planets": karaka_planets,
         "volatility": volatility,
         "method": "Engine Config Multi-Layer Market Framework v4",
         "drivers": drivers,
@@ -2259,13 +2835,107 @@ async def tezi_mandi(
     }
 
 
+# ─── Saved readings (cross-device kundli history) ────────────────────────────
+
+@app.get("/history")
+async def list_history(user: Optional[str] = Depends(require_user)):
+    """List this account's saved readings, newest first (metadata only)."""
+    if not user:
+        return {"items": [], "auth_enforced": AUTH_ENFORCE}
+
+    conn = _auth_db()
+    try:
+        rows = conn.execute(
+            """SELECT id, title, person_name, dob, tob, place, language, created_at
+               FROM kundli_reports WHERE identifier = ?
+               ORDER BY id DESC LIMIT ?""",
+            (user, KUNDLI_HISTORY_LIMIT),
+        ).fetchall()
+    except Exception as e:
+        print("HISTORY LIST ERROR:", repr(e))
+        return {"items": [], "error": "History load nahi ho paayi."}
+    finally:
+        conn.close()
+
+    return {
+        "items": [
+            {
+                "id": r[0], "title": r[1], "person_name": r[2], "dob": r[3],
+                "tob": r[4], "place": r[5], "language": r[6], "created_at": r[7],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/history/{report_id}")
+async def get_history_item(report_id: int, user: Optional[str] = Depends(require_user)):
+    """Return one saved reading in full. Scoped to the calling account."""
+    if not user:
+        raise HTTPException(status_code=404, detail="Report nahi mila.")
+
+    conn = _auth_db()
+    try:
+        row = conn.execute(
+            "SELECT payload FROM kundli_reports WHERE id = ? AND identifier = ?",
+            (int(report_id), user),
+        ).fetchone()
+    except Exception as e:
+        print("HISTORY GET ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail="Report load nahi ho paayi.")
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Report nahi mila.")
+    try:
+        return {"report": json.loads(row[0])}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Saved report corrupt hai.")
+
+
+@app.delete("/history/{report_id}")
+async def delete_history_item(report_id: int, user: Optional[str] = Depends(require_user)):
+    """Delete one saved reading belonging to the calling account."""
+    if not user:
+        raise HTTPException(status_code=404, detail="Report nahi mila.")
+
+    conn = _auth_db()
+    try:
+        cur = conn.execute(
+            "DELETE FROM kundli_reports WHERE id = ? AND identifier = ?",
+            (int(report_id), user),
+        )
+        conn.commit()
+        deleted = cur.rowcount
+    except Exception as e:
+        print("HISTORY DELETE ERROR:", repr(e))
+        raise HTTPException(status_code=500, detail="Report delete nahi ho paayi.")
+    finally:
+        conn.close()
+
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Report nahi mila.")
+    return {"deleted": True, "id": int(report_id)}
+
+
 @app.get("/health")
 async def health_check():
+    """Service status plus enough LLM detail to diagnose a degraded install.
+
+    When readings come back as computed-only fallbacks, this is where to look:
+    it names the model actually in use and the last provider error (typically
+    an exhausted free-tier quota).
+    """
     return {
         "status": "ok",
         "openai_configured": openai_client is not None,
+        "openai_model": OPENAI_MODEL if openai_client is not None else None,
         "gemini_configured": model is not None,
+        "gemini_model": _GEMINI_MODEL_NAME,
+        "gemini_candidates_remaining": len(_GEMINI_CANDIDATES),
         "llm_available": (openai_client is not None) or (model is not None),
+        "last_llm_error": _LAST_LLM_ERROR,
     }
 
 @app.post("/full-analysis")
@@ -2398,11 +3068,13 @@ Total: 750-1000 words. Every line must be factually tied to the chart above."""
     except Exception as e:
         print("BACKEND ERROR:", repr(e))
         err_text = str(e).lower()
-        if "resourceexhausted" in err_text or "quota" in err_text:
+        if _is_quota_error(e):
             return {
                 "prediction": (
-                    "Dasha detailed response abhi quota limit ki wajah se seedha nahi aa pa raha. "
-                    "Kripya thodi der baad retry karein; tab tak chart ke Janam/Gochar/Prashna sections se actionable guidance follow karein."
+                    "Dasha detailed response abhi API quota limit ki wajah se nahi aa pa raha. "
+                    "Aapki LLM key ka daily/minute limit khatam ho gaya hai — thodi der baad retry karein, "
+                    "ya backend/.env me OPENAI_API_KEY set karein. "
+                    "Tab tak chart ke Janam/Gochar/Prashna sections se actionable guidance follow karein."
                 )
             }
         if "timeout" in err_text:
@@ -2548,8 +3220,9 @@ async def section_qa(
     except Exception as e:
         print("SECTION QA ERROR:", repr(e))
         err_text = str(e).lower()
-        if "resourceexhausted" in err_text or "quota" in err_text:
-            answer = "Q&A temporary unavailable due to API quota limit. Please retry after some time."
+        if _is_quota_error(e):
+            answer = ("Q&A abhi API quota limit ki wajah se available nahi hai. "
+                      "Thodi der baad retry karein, ya backend/.env me OPENAI_API_KEY set karein.")
         elif "timeout" in err_text:
             answer = "Q&A response timed out. Please retry once."
         else:
@@ -2566,27 +3239,60 @@ def _repair_json(text: str) -> str:
     return text
 
 
+# Honorifics the model may use for itself — always normalized to "Guru Ji".
+_SELF_ALIAS_PATTERNS = [
+    r"\bguru\s*ji\b",
+    r"\bguruji\b",
+    r"\bacharya\s*ji\b",
+    r"\bacharya\b",
+    r"\bpandit\s*ji\b",
+    r"\bpandit\b",
+    r"\bjyotishi\s*ji\b",
+]
+
+# Machine-facing phrases only. These are deliberately narrow: a blanket
+# \bmodel\b / \bAI\b replacement rewrote ordinary content too ("role model"
+# -> "role Guru Ji", "AI ke zamane mein" -> "Guru Ji ke zamane mein").
+_SELF_DISCLOSURE_PATTERNS = [
+    r"\b(?:as\s+)?an?\s+AI(?:\s+(?:language\s+)?(?:model|assistant|system|bot))?\b",
+    r"\b(?:this|the)\s+AI(?:\s+(?:language\s+)?(?:model|assistant|system|bot))?\b",
+    r"\bAI\s+(?:language\s+)?(?:model|assistant|system|bot)\b",
+    r"\b(?:large\s+)?language\s+model\b",
+    r"\bvirtual\s+assistant\b",
+    r"\b(?:main|mai)\s+(?:ek\s+)?AI\b",
+    r"\bAI\s+hoon\b",
+]
+
+# Keys carrying computed/machine data — never rewrite these.
+_NORMALIZE_SKIP_KEYS = {
+    "chart_summary", "multi_system_analysis", "kp_core", "rule_hits",
+    "planets", "planet_houses", "dasha", "dasha_by_decade", "dasha_sequences",
+    "scores", "flags", "market_prediction", "market_past",
+    "investment_advice_engine", "drivers",
+}
+
+
 def _normalize_self_reference(value):
-    """Force one assistant name in all user-visible outputs."""
+    """Force one assistant name in user-visible text.
+
+    Only self-referential wording is rewritten; ordinary vocabulary and
+    computed chart data are left untouched.
+    """
     if isinstance(value, dict):
-        return {k: _normalize_self_reference(v) for k, v in value.items()}
+        return {
+            k: (v if k in _NORMALIZE_SKIP_KEYS else _normalize_self_reference(v))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [_normalize_self_reference(v) for v in value]
     if isinstance(value, str):
         text = value
-        patterns = [
-            r"\bAI\b",
-            r"\bassistant\b",
-            r"\bmodel\b",
-            r"\bacharya\s*ji\b",
-            r"\bacharya\b",
-            r"\bpandit\s*ji\b",
-            r"\bpandit\b",
-            r"\bguru\s*ji\b",
-            r"\bguruji\b",
-        ]
-        for pat in patterns:
+        for pat in _SELF_DISCLOSURE_PATTERNS:
             text = re.sub(pat, "Guru Ji", text, flags=re.IGNORECASE)
+        for pat in _SELF_ALIAS_PATTERNS:
+            text = re.sub(pat, "Guru Ji", text, flags=re.IGNORECASE)
+        # Collapse any "Guru Ji Guru Ji" left behind by overlapping matches.
+        text = re.sub(r"\bGuru Ji\b(?:\s+Guru Ji\b)+", "Guru Ji", text)
         return text
     return value
 
@@ -2595,44 +3301,86 @@ def _contains_latin_chars(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", str(text or "")))
 
 
+# Latin tokens that are legitimately expected inside a Devanagari reading:
+# the mandated self-reference, planet/sign/nakshatra names echoed from the
+# computed chart, and the section labels used in the prompt.
+_ALLOWED_LATIN_TOKENS = {
+    "guru", "ji", "gurují",
+    "sun", "moon", "mars", "mercury", "jupiter", "venus", "saturn", "rahu", "ketu",
+    "lagna", "lagnesh", "kundli", "janam", "gochar", "prashna", "dasha",
+    "mahadasha", "antardasha", "pratyantardasha", "nakshatra", "rashi",
+    "bhava", "bhav", "navamsha", "upay", "kp", "atmakaraka", "karakamsa",
+    "divya", "sanket", "agla", "karm", "sankalp", "ateet", "vartaman", "bhavishya",
+    "swiss", "ephemeris", "vedic", "parashar", "jaimini", "bhrigu",
+}
+_ALLOWED_LATIN_TOKENS.update(s.lower() for s in SIGNS)
+_ALLOWED_LATIN_TOKENS.update(s.lower() for s in SIGNS_HI)
+_ALLOWED_LATIN_TOKENS.update(n.lower() for n in NAKSHATRAS)
+
+# Below this share of Devanagari letters the text is treated as Roman/Hinglish.
+_DEVANAGARI_MIN_SHARE = 0.60
+
+
+def _devanagari_share(text: str) -> Optional[float]:
+    """Share of alphabetic characters that are Devanagari, ignoring the
+    proper nouns a Hindi reading is expected to carry.
+
+    Returns None when there is not enough text to judge.
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return None
+
+    # Drop allowed Latin proper nouns before measuring.
+    def _strip_allowed(match: "re.Match") -> str:
+        return "" if match.group(0).lower() in _ALLOWED_LATIN_TOKENS else match.group(0)
+
+    cleaned = re.sub(r"[A-Za-z]+", _strip_allowed, raw)
+
+    dev = len(re.findall(r"[ऀ-ॿ]", cleaned))
+    lat = len(re.findall(r"[A-Za-z]", cleaned))
+    total = dev + lat
+    if total < 12:          # too short to classify reliably
+        return None
+    return dev / total
+
+
 def _kundli_payload_has_hinglish(payload: dict) -> bool:
+    """True only when a Hindi reading is *predominantly* Roman script.
+
+    The previous implementation rejected the payload if it contained a single
+    Latin character. Because the prompt mandates the Latin self-reference
+    "Guru Ji" and echoes Latin planet names from the computed chart, that made
+    almost every successful Hindi generation get thrown away and replaced by
+    the canned fallback text.
+    """
     if not isinstance(payload, dict):
         return False
 
-    blocks = [
-        payload.get("janam_kundli", {}),
-        payload.get("gochar_kundli", {}),
-        payload.get("prashna_kundli", {}),
-    ]
-
-    for block in blocks:
+    fragments: List[str] = []
+    for block in (payload.get("janam_kundli"), payload.get("gochar_kundli"),
+                  payload.get("prashna_kundli")):
         if not isinstance(block, dict):
             continue
         for key in ("prediction", "detailed_prediction"):
-            if _contains_latin_chars(block.get(key, "")):
-                return True
+            fragments.append(str(block.get(key, "")))
 
         steps = block.get("next_steps", [])
         if isinstance(steps, list):
-            for s in steps:
-                if _contains_latin_chars(s):
-                    return True
+            fragments.extend(str(s) for s in steps)
 
         houses = block.get("houses", [])
         if isinstance(houses, list):
             for h in houses:
                 if not isinstance(h, dict):
                     continue
-                for hk in ("prediction", "advice", "upay", "body_parts", "health_note"):
-                    if _contains_latin_chars(h.get(hk, "")):
-                        return True
-                issues = h.get("possible_issues", [])
-                if isinstance(issues, list):
-                    for issue in issues:
-                        if _contains_latin_chars(issue):
-                            return True
+                for hk in ("prediction", "advice", "upay", "health_note"):
+                    fragments.append(str(h.get(hk, "")))
 
-    return False
+    share = _devanagari_share(" ".join(f for f in fragments if f.strip()))
+    if share is None:
+        return False
+    return share < _DEVANAGARI_MIN_SHARE
 
 
 def _extract_json_block(text: str):
@@ -2657,13 +3405,21 @@ def _extract_json_block(text: str):
 @app.post("/kundli-analysis")
 async def kundli_analysis(
     user: UserInput,
-    _user: Optional[str] = Depends(require_user),
+    account: Optional[str] = Depends(require_user),
     _rl: None = Depends(rate_limit),
 ):
-    if model is None and openai_client is None:
-        return {
-            "error": "Backend chal raha hai, lekin koi LLM key (OPENAI_API_KEY ya GOOGLE_API_KEY) set nahi hai. backend/.env check karein."
-        }
+    def _finalize(payload: dict) -> dict:
+        """Persist the reading for signed-in users, then return it."""
+        if account:
+            _save_kundli_report(account, user, payload)
+        return payload
+
+    # NOTE: a missing LLM key is NOT fatal here. The chart, the 12 houses, the
+    # dasha timeline and the multi-system analysis are all computed from the
+    # Swiss Ephemeris — only the narrative prose needs a model. So the endpoint
+    # continues and returns the computed fallback reading further down rather
+    # than refusing outright.
+    llm_available = not (model is None and openai_client is None)
 
     # Geocode if lat/lng not provided by frontend
     if (user.lat is None or user.lng is None) and user.place:
@@ -3123,6 +3879,14 @@ async def kundli_analysis(
             "system_note": reason,
         }
 
+    if not llm_available:
+        # Everything above is real computed astrology; only the AI narration is
+        # missing. Serve the chart-derived reading instead of an error page.
+        return _finalize(_build_fallback_payload(
+            "Koi LLM key (OPENAI_API_KEY ya GOOGLE_API_KEY) set nahi hai, isliye "
+            "Swiss Ephemeris se computed chart-aadharit reading dikhayi ja rahi hai."
+        ))
+
     # Serialize to JSON so the prompt carries exact factual data
     _h_facts = [
         {
@@ -3251,9 +4015,9 @@ CRITICAL: Return ONLY valid JSON. No markdown. No code fences."""
         parsed = _extract_json_block(raw_text)
 
         if not parsed:
-            return _build_fallback_payload(
+            return _finalize(_build_fallback_payload(
                 "Structured kundli response parse nahi ho paaya; fast fallback diya gaya."
-            )
+            ))
 
         # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -3582,18 +4346,24 @@ CRITICAL: Return ONLY valid JSON. No markdown. No code fences."""
         }
 
         if hi and _kundli_payload_has_hinglish(result_payload):
-            return _build_fallback_payload(
+            return _finalize(_build_fallback_payload(
                 "भाषा शुद्धता नियम सक्रिय: हिंग्लिश सामग्री मिली, इसलिए शुद्ध देवनागरी वैकल्पिक पाठ प्रस्तुत किया गया।"
-            )
+            ))
 
-        return _normalize_self_reference(result_payload)
+        return _finalize(_normalize_self_reference(result_payload))
     except asyncio.TimeoutError:
-        return _build_fallback_payload(
+        return _finalize(_build_fallback_payload(
             f"Prediction service timeout ({int(KUNDLI_MODEL_TIMEOUT_SECONDS)}s); fast fallback response returned."
-        )
+        ))
     except Exception as e:
         print("KUNDLI API ERROR:", repr(e))
-        return _build_fallback_payload(f"API fallback activated: {repr(e)}")
+        if _is_quota_error(e):
+            return _finalize(_build_fallback_payload(
+                "LLM API quota limit khatam ho gaya hai, isliye Swiss Ephemeris se computed "
+                "chart-aadharit reading dikhayi ja rahi hai. Thodi der baad retry karein ya "
+                "backend/.env me OPENAI_API_KEY set karein."
+            ))
+        return _finalize(_build_fallback_payload(f"API fallback activated: {repr(e)}"))
 
 
 if __name__ == "__main__":

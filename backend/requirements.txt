@@ -6,3 +6,6 @@ openai
 pyswisseph==2.10.3.2
 timezonefinder==8.2.1
 httpx
+# zoneinfo has no bundled tz database on Windows (and on slim Linux images).
+# Without this, every chart computation raises ZoneInfoNotFoundError.
+tzdata
