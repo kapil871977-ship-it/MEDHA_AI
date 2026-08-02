@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG BUILDS ONLY.
+
+  Android blocks plain HTTP by default. A debug build pointed at a backend
+  running on a development machine over the LAN therefore cannot connect,
+  because that server speaks http:// and has no TLS certificate.
+
+  This file lives in src/debug/, so it is compiled into debug builds only and
+  is absent from release builds — those stay HTTPS-only with no exceptions.
+
+  Cleartext is permitted for private-network addresses only, never for the
+  public internet. Add your machine's LAN address below if it differs.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.1.102</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>       <!-- emulator -> host -->
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+
+    <!-- Everything else keeps the platform default: HTTPS required. -->
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

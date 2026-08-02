@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only manifest overlay. Gradle merges this into the main manifest for
+  debug builds and ignores it entirely for release builds.
+
+  Its only job is to attach the debug network security config, which permits
+  cleartext HTTP to private LAN addresses so the app can reach a backend
+  running on a development machine. Release builds remain HTTPS-only.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:replace="android:networkSecurityConfig" />
+</manifest>
