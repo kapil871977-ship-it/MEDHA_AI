@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
 
+// Safe localStorage wrappers: private-mode / disabled storage throws on access,
+// which would otherwise white-screen the whole app. These degrade gracefully.
+const safeGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const safeSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage disabled */ } };
+const safeRemove = (k) => { try { localStorage.removeItem(k); } catch { /* storage disabled */ } };
+
 // True when running inside the Capacitor native shell (Android/iOS), where the
 // bridge injects `window.Capacitor`. Checked lazily so the web build and the
 // Jest environment never need the native runtime.
@@ -63,18 +69,18 @@ const TEZI_COMMODITY_SUGGESTIONS = [
 ];
 
 const HOUSE_NAME_HI = {
-  1: 'लग्न भाव',
-  2: 'धन भाव',
-  3: 'पराक्रम भाव',
-  4: 'सुख भाव',
-  5: 'पुत्र भाव',
-  6: 'रोग भाव',
-  7: 'कलत्र भाव',
-  8: 'मृत्यु भाव',
-  9: 'भाग्य भाव',
-  10: 'कर्म भाव',
-  11: 'लाभ भाव',
-  12: 'व्यय भाव',
+  1: 'Lagna Bhav',
+  2: 'Dhan Bhav',
+  3: 'Parakram Bhav',
+  4: 'Sukh Bhav',
+  5: 'Putra Bhav',
+  6: 'Rog Bhav',
+  7: 'Kalatra Bhav',
+  8: 'Mrityu Bhav',
+  9: 'Bhagya Bhav',
+  10: 'Karma Bhav',
+  11: 'Labh Bhav',
+  12: 'Vyay Bhav',
 };
 
 const PLANET_FIELD_HINTS_HI = {
@@ -100,9 +106,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_M
 }
 
 function clearSession() {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
-  localStorage.removeItem(AUTH_IDENTIFIER_KEY);
-  localStorage.removeItem(AUTH_STORAGE_KEY);
+  safeRemove(AUTH_TOKEN_KEY);
+  safeRemove(AUTH_IDENTIFIER_KEY);
+  safeRemove(AUTH_STORAGE_KEY);
 }
 
 /**
@@ -110,7 +116,11 @@ function clearSession() {
  * Handles bearer auth, 401 session expiry, 429 throttling and timeouts.
  */
 async function apiRequest(endpointPath, options = {}) {
-  const { method = 'POST', payload, timeoutMs = REQUEST_TIMEOUT_MS } = options;
+  const { method = 'POST', payload } = options;
+  // Auth calls should fail fast: a hung login shouldn't burn ~180s (90s per
+  // base URL) before the user sees an error.
+  const isAuthPath = endpointPath.startsWith('/auth/');
+  const timeoutMs = options.timeoutMs ?? (isAuthPath ? 15000 : REQUEST_TIMEOUT_MS);
   const baseUrls = getApiBaseUrls();
 
   if (!baseUrls.length) {
@@ -119,7 +129,7 @@ async function apiRequest(endpointPath, options = {}) {
     );
   }
 
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  const token = safeGet(AUTH_TOKEN_KEY);
   const headers = {};
   if (payload !== undefined) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -135,16 +145,24 @@ async function apiRequest(endpointPath, options = {}) {
       }, timeoutMs);
 
       if (res.status === 401) {
-        // Session expired or invalid — clear auth and force re-login.
+        // Session expired or invalid — clear auth and force re-login. This is a
+        // definitive answer from the server, so do not retry the next base URL.
         clearSession();
+        window.dispatchEvent(new Event('medha-auth-expired'));
         if (window.location.hash !== '#login') window.location.hash = '#login';
-        throw new Error('Session expired. Kripya dubara login karein.');
+        const err401 = new Error('Session expired. Kripya dubara login karein.');
+        err401.nonRetryable = true;
+        throw err401;
       }
       if (res.status === 429) {
-        throw new Error('Bahut zyada requests. Kripya ek minute baad try karein.');
+        const err429 = new Error('Bahut zyada requests. Kripya ek minute baad try karein.');
+        err429.nonRetryable = true;
+        throw err429;
       }
       if (res.status === 404) {
-        throw new Error('Yeh record nahi mila.');
+        const err404 = new Error('Yeh record nahi mila.');
+        err404.nonRetryable = true;
+        throw err404;
       }
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
@@ -156,6 +174,11 @@ async function apiRequest(endpointPath, options = {}) {
       }
       return json;
     } catch (err) {
+      // A definitive HTTP status (401/404/429) is the server's final word — do
+      // not fall through to the next base URL, surface it immediately.
+      if (err?.nonRetryable) {
+        throw err;
+      }
       if (err?.name === 'AbortError') {
         lastError = new Error(`Request timeout (${Math.round(timeoutMs / 1000)}s) at ${baseUrl}`);
       } else {
@@ -262,12 +285,12 @@ function dedupeSentences(input) {
 
 function getHouseHeading(houseNumber, fallbackName) {
   const num = Number(houseNumber || 0);
-  const hiName = HOUSE_NAME_HI[num] || 'भाव';
+  const hiName = HOUSE_NAME_HI[num] || 'Bhav';
   const cleanFallback = String(fallbackName || '').trim();
   if (cleanFallback) {
-    return `भाव ${num}: ${hiName} (${cleanFallback})`;
+    return `Bhav ${num}: ${hiName} (${cleanFallback})`;
   }
-  return `भाव ${num}: ${hiName}`;
+  return `Bhav ${num}: ${hiName}`;
 }
 
 function buildDetailedFromBlock(block, title) {
@@ -421,7 +444,7 @@ function useNativeShell(route) {
 }
 
 function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(Boolean(localStorage.getItem(AUTH_TOKEN_KEY)));
+  const [isLoggedIn, setIsLoggedIn] = useState(Boolean(safeGet(AUTH_TOKEN_KEY)));
   const [route, setRoute] = useState(window.location.hash || '#home');
 
   useEffect(() => {
@@ -430,13 +453,21 @@ function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
+  // A 401 anywhere in the app clears the stored token and fires this event so
+  // the UI drops back to the logged-out state instead of showing stale auth.
+  useEffect(() => {
+    const onAuthExpired = () => setIsLoggedIn(false);
+    window.addEventListener('medha-auth-expired', onAuthExpired);
+    return () => window.removeEventListener('medha-auth-expired', onAuthExpired);
+  }, []);
+
   useNativeShell(route);
 
   // A stored token can be expired or signed with an old server secret. Verify
   // it once on start-up so the user lands on the login screen immediately
   // instead of hitting an error on their first real request.
   useEffect(() => {
-    if (!localStorage.getItem(AUTH_TOKEN_KEY)) return undefined;
+    if (!safeGet(AUTH_TOKEN_KEY)) return undefined;
 
     let cancelled = false;
     (async () => {
@@ -470,6 +501,8 @@ function App() {
     page = <LoginPage onLoginSuccess={onLoginSuccess} />;
   } else if (route === '#kundli') {
     page = guarded(<KundliPage onLogout={handleLogout} />);
+  } else if (route === '#saved') {
+    page = guarded(<KundliPage onLogout={handleLogout} savedMode />);
   } else if (route === '#remedies') {
     page = guarded(<RemediesPage onLogout={handleLogout} />);
   } else if (route === '#history') {
@@ -519,13 +552,18 @@ function LoginPage({ onLoginSuccess }) {
         throw new Error('Server se token nahi mila. Dubara try karein.');
       }
 
-      localStorage.setItem(AUTH_TOKEN_KEY, res.token);
-      localStorage.setItem(AUTH_IDENTIFIER_KEY, res.identifier || emailOrMobile.trim().toLowerCase());
-      localStorage.setItem(AUTH_STORAGE_KEY, '1');
+      safeSet(AUTH_TOKEN_KEY, res.token);
+      safeSet(AUTH_IDENTIFIER_KEY, res.identifier || emailOrMobile.trim().toLowerCase());
+      safeSet(AUTH_STORAGE_KEY, '1');
       onLoginSuccess();
       window.location.hash = '#home';
     } catch (e) {
-      setError(String(e?.message || e || 'Kuch galat ho gaya. Dubara try karein.'));
+      console.error('Auth request failed:', e);
+      const msg = String(e?.message || '');
+      const looksTechnical = /http\s*\d|timeout|127\.0\.0\.1|https?:\/\//i.test(msg);
+      setError(looksTechnical || !msg
+        ? 'Server se connection nahi ho paya. Kripya thodi der baad try karein.'
+        : msg);
     } finally {
       setLoading(false);
     }
@@ -617,9 +655,10 @@ function LoginPage({ onLoginSuccess }) {
 
 function HomePage({ onLogout }) {
   const [message, setMessage] = useState('');
+  const [messageIsError, setMessageIsError] = useState(false);
   const [formData, setFormData] = useState(() => {
     try {
-      const raw = localStorage.getItem(FORM_STORAGE_KEY);
+      const raw = safeGet(FORM_STORAGE_KEY);
       if (raw) return JSON.parse(raw);
     } catch {
       // ignore invalid cache
@@ -643,40 +682,31 @@ function HomePage({ onLogout }) {
     if (!formData.tob) missing.push('Janam Samay');
     if (!formData.place?.trim()) missing.push('Janam Sthan');
     if (missing.length) {
+      setMessageIsError(true);
       setMessage(`Yeh field bharna zaroori hai: ${missing.join(', ')}.`);
       return;
     }
 
     const dobDate = new Date(`${formData.dob}T00:00:00`);
     if (Number.isNaN(dobDate.getTime())) {
+      setMessageIsError(true);
       setMessage('Janam tarikh sahi format me nahi hai.');
       return;
     }
     if (dobDate > new Date()) {
+      setMessageIsError(true);
       setMessage('Janam tarikh future me nahi ho sakti.');
       return;
     }
 
-    localStorage.setItem(FORM_STORAGE_KEY, JSON.stringify(formData));
+    setMessageIsError(false);
+    setMessage('');
+    safeSet(FORM_STORAGE_KEY, JSON.stringify(formData));
 
-    // A native WebView has no tabs — window.open would either be ignored or
-    // bounce the user out into the system browser (where the session and the
-    // saved form do not exist). Navigate in place there.
-    if (isNativeApp()) {
-      window.location.hash = '#kundli';
-      return;
-    }
-
-    const url = `${window.location.origin}${window.location.pathname}#kundli`;
-    const newTab = window.open(url, '_blank', 'noopener,noreferrer');
-
-    if (!newTab || newTab.closed || typeof newTab.closed === 'undefined') {
-      window.location.hash = '#kundli';
-      setMessage('Popup blocked tha, kundli isi tab me khol di gayi hai.');
-      return;
-    }
-
-    setMessage('Kundli nayi tab me khul gayi hai.');
+    // Open the kundli in place (same page) rather than a new browser tab: a new
+    // tab has no access to this session/saved form, and native WebViews have no
+    // tabs at all.
+    window.location.hash = '#kundli';
   };
 
   return (
@@ -711,7 +741,7 @@ function HomePage({ onLogout }) {
           max="9"
           style={inputStyle}
           value={formData.selected_number}
-          onChange={(e) => setFormData({ ...formData, selected_number: parseInt(e.target.value || '1', 10) })}
+          onChange={(e) => setFormData({ ...formData, selected_number: Math.min(9, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })}
         />
 
         <label style={labelStyle}>Language</label>
@@ -720,8 +750,8 @@ function HomePage({ onLogout }) {
           <option value="en">English</option>
         </select>
 
-        <button style={buttonStyle} onClick={openKundliPage}>Kundli Nayi Page Mein Kholen</button>
-        {message ? <p style={msgStyle}>{message}</p> : null}
+        <button style={buttonStyle} onClick={openKundliPage}>Kundli Kholen</button>
+        {message ? <p style={messageIsError ? errorStyle : msgStyle}>{message}</p> : null}
       </div>
     </div>
   );
@@ -741,7 +771,7 @@ function collectRemedies(data) {
   return out;
 }
 
-function KundliPage({ onLogout }) {
+function KundliPage({ onLogout, savedMode = false }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [warning, setWarning] = useState('');
@@ -752,7 +782,7 @@ function KundliPage({ onLogout }) {
   const [activeModule, setActiveModule] = useState('janam');
 
   const formData = useMemo(() => {
-    const raw = localStorage.getItem(FORM_STORAGE_KEY);
+    const raw = safeGet(FORM_STORAGE_KEY);
     if (!raw) return null;
     try {
       return JSON.parse(raw);
@@ -765,6 +795,24 @@ function KundliPage({ onLogout }) {
     let cancelled = false;
 
     const run = async () => {
+      // Saved-report mode: render a previously saved reading from local storage,
+      // no network call.
+      if (savedMode) {
+        const raw = safeGet(LATEST_KUNDLI_KEY);
+        let saved = null;
+        if (raw) { try { saved = JSON.parse(raw); } catch { saved = null; } }
+        if (saved) {
+          setData(saved);
+          setWarning('Yeh aapki saved report hai.');
+          setDashaPrediction(buildDashaFallbackFromChart(saved));
+        } else {
+          setError('Saved report nahi mili. Kripya nayi kundli banayein.');
+        }
+        setLoading(false);
+        setDashaLoading(false);
+        return;
+      }
+
       if (!formData) {
         setError('Pehle home page par details fill karke kundli kholen.');
         setLoading(false);
@@ -776,7 +824,7 @@ function KundliPage({ onLogout }) {
         if (!cancelled) {
           setData(result);
           setWarning(result?.system_note ? formatSystemNotice(result.system_note) : '');
-          localStorage.setItem(LATEST_KUNDLI_KEY, JSON.stringify(result));
+          safeSet(LATEST_KUNDLI_KEY, JSON.stringify(result));
           setLoading(false);
           setDashaLoading(true);
         }
@@ -787,7 +835,19 @@ function KundliPage({ onLogout }) {
             const rawDashaText = String(dashaResult?.prediction || '').trim();
             const safeDashaText = formatDashaErrorText(rawDashaText);
             const lower = safeDashaText.toLowerCase();
-            if (lower.includes('temporary') || lower.includes('unavailable') || lower.includes('retry') || lower.includes('quota')) {
+            // Only treat this as an error notice when the text is SHORT and
+            // clearly an error message. A real reading is long and may
+            // legitimately use words like "temporary", so the length guard
+            // prevents a valid reading from being shown as a red error.
+            const looksLikeError = safeDashaText.length < 400 && (
+              lower.includes('unavailable') ||
+              lower.includes('retry') ||
+              lower.includes('quota') ||
+              lower.includes('timeout') ||
+              lower.includes('temporary issue') ||
+              lower.includes('technical issue')
+            );
+            if (looksLikeError) {
               setDashaError(safeDashaText);
               setDashaPrediction(buildDashaFallbackFromChart(result));
             } else {
@@ -803,8 +863,9 @@ function KundliPage({ onLogout }) {
           if (!cancelled) setDashaLoading(false);
         }
       } catch (e) {
+        console.error('Kundli load failed:', e);
         if (!cancelled) {
-          const cachedRaw = localStorage.getItem(LATEST_KUNDLI_KEY);
+          const cachedRaw = safeGet(LATEST_KUNDLI_KEY);
           let cachedData = null;
           if (cachedRaw) {
             try {
@@ -815,9 +876,9 @@ function KundliPage({ onLogout }) {
           }
           if (cachedData) {
             setData(cachedData);
-            setWarning(`Live kundli abhi load nahi hui: ${String(e.message || e)}. Last saved report dikhayi ja rahi hai.`);
+            setWarning('Live kundli abhi load nahi hui. Last saved report dikhayi ja rahi hai.');
           } else {
-            setError(`Kundli load nahi ho paayi: ${String(e.message || e)}`);
+            setError('Server se connection nahi ho paya. Kripya thodi der baad try karein.');
           }
         }
       } finally {
@@ -827,7 +888,7 @@ function KundliPage({ onLogout }) {
 
     run();
     return () => { cancelled = true; };
-  }, [formData]);
+  }, [formData, savedMode]);
 
 
   // Guru Ji avatar UI (rotating photos)
@@ -1039,7 +1100,7 @@ function KundliSection({ title, block }) {
   // Remove unwanted fallback phrase from predictions
   const cleanPrediction = (text) => {
     if (!text) return '';
-    return String(text).replace(/Detailed Janam Kundli fallback: viewed across past-present-future,? ?/i, '');
+    return String(text).replace(/Detailed .*? Kundli fallback: viewed across past-present-future,? ?/i, '');
   };
   const shortPrediction = dedupeSentences(cleanPrediction(block?.prediction) || 'Prediction unavailable.');
   const rawDetailedPrediction = dedupeSentences(cleanPrediction(block?.detailed_prediction) || '');
@@ -1123,7 +1184,7 @@ function DashaSection({ prediction, loading, error }) {
  * Closing price shown in the currency and unit the exchange actually quotes,
  * with an indicative INR conversion for USD-quoted instruments.
  *
- * The old table hard-coded "Price (रु.)" and per-gram / per-kg / per-quintal
+ * The old table hard-coded "Price (Rs.)" and per-gram / per-kg / per-quintal
  * rows for every instrument. Those symbols are USD-quoted (COMEX gold is USD
  * per troy ounce, CBOT wheat is US cents per bushel, Nifty is index points),
  * so the headline figure was wrong in both currency and magnitude.
@@ -1136,10 +1197,10 @@ function PriceBreakdownTable({ result }) {
   }));
 
   const rows = [
-    { label: `प्रति ${unit}`, native: result.price_per_base_unit, inr: result.price_inr_per_base_unit },
-    { label: 'प्रति ग्राम', native: result.price_per_gram, inr: result.price_inr_per_gram },
-    { label: 'प्रति किलो', native: result.price_per_kg, inr: result.price_inr_per_kg },
-    { label: 'प्रति क्विंटल', native: result.price_per_quintal, inr: result.price_inr_per_quintal }
+    { label: `Prati ${unit}`, native: result.price_per_base_unit, inr: result.price_inr_per_base_unit },
+    { label: 'Prati gram', native: result.price_per_gram, inr: result.price_inr_per_gram },
+    { label: 'Prati kilo', native: result.price_per_kg, inr: result.price_inr_per_kg },
+    { label: 'Prati quintal', native: result.price_per_quintal, inr: result.price_inr_per_quintal }
   ].filter((r) => r.native !== null && r.native !== undefined);
 
   const showInr = currency !== 'INR' && rows.some((r) => r.inr !== null && r.inr !== undefined);
@@ -1161,7 +1222,7 @@ function PriceBreakdownTable({ result }) {
           <table style={kpTableStyle}>
             <thead>
               <tr>
-                <th style={kpThStyle}>Unit (इकाई)</th>
+                <th style={kpThStyle}>Unit</th>
                 <th style={kpThStyle}>Price ({currency || '-'})</th>
                 {showInr ? <th style={kpThStyle}>Approx INR</th> : null}
               </tr>
@@ -1199,7 +1260,7 @@ function TeziMandiPanel({ formData }) {
   const [result, setResult] = useState(null);
   const [history, setHistory] = useState(() => {
     try {
-      const raw = localStorage.getItem(TEZI_MANDI_HISTORY_KEY);
+      const raw = safeGet(TEZI_MANDI_HISTORY_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
       return Array.isArray(parsed) ? parsed : [];
     } catch {
@@ -1318,8 +1379,8 @@ function TeziMandiPanel({ formData }) {
       setResult(nextResult);
 
       const entry = {
-        product: nextResult.product,
-        target_date: nextResult.target_date,
+        product: nextResult.product || product.trim(),
+        target_date: nextResult.target_date || targetDate,
         signal: nextResult.display_signal_hi || nextResult.signal,
         summary: nextResult.mode === 'historical'
           ? `${nextResult.historical_session_date || nextResult.target_date} close ${nextResult.price_currency || ''} ${nextResult.price_per_base_unit ?? nextResult.historical_close_rate ?? '-'} per ${nextResult.price_base_unit || 'unit'} | ${nextResult.historical_market_direction || 'neutral'}`.replace(/\s+/g, ' ')
@@ -1328,9 +1389,10 @@ function TeziMandiPanel({ formData }) {
       };
       const nextHistory = [entry, ...history].slice(0, 8);
       setHistory(nextHistory);
-      localStorage.setItem(TEZI_MANDI_HISTORY_KEY, JSON.stringify(nextHistory));
+      safeSet(TEZI_MANDI_HISTORY_KEY, JSON.stringify(nextHistory));
     } catch (e) {
-      setError(`Tezi-Mandi error: ${String(e?.message || e)}`);
+      console.error('Tezi-Mandi request failed:', e);
+      setError('Server se connection nahi ho paya. Kripya thodi der baad try karein.');
     } finally {
       setLoading(false);
     }
@@ -1449,7 +1511,7 @@ function TeziMandiPanel({ formData }) {
             </p>
           ) : null}
           <p style={mutedStyle}>
-            Confidence: {result.confidence}% | Volatility: {result.volatility}
+            Confidence: {result.confidence ?? '-'}% | Volatility: {result.volatility || '-'}
             {Array.isArray(result.karaka_planets) && result.karaka_planets.length
               ? ` | Karaka: ${result.karaka_planets.join(', ')}`
               : ''}
@@ -1486,7 +1548,7 @@ function SectionQAPanel({ section, language, contextText }) {
 
   const askQuestion = async () => {
     if (!question.trim()) {
-      setError('Please enter your question / कृपया अपना प्रश्न लिखें।');
+      setError('Kripya apna prashna likhein.');
       return;
     }
 
@@ -1502,9 +1564,10 @@ function SectionQAPanel({ section, language, contextText }) {
         context: contextText,
         answer_mode: isDetailed ? 'detailed' : 'short'
       });
-      setAnswer(String(res?.answer || '').trim() || 'No answer generated / उत्तर उपलब्ध नहीं है।');
+      setAnswer(String(res?.answer || '').trim() || 'Uttar uplabdh nahi hai.');
     } catch (e) {
-      setError(`Q&A error: ${String(e?.message || e)}`);
+      console.error('Section Q&A request failed:', e);
+      setError('Server se connection nahi ho paya. Kripya thodi der baad try karein.');
     } finally {
       setLoading(false);
     }
@@ -1518,16 +1581,16 @@ function SectionQAPanel({ section, language, contextText }) {
       <textarea
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
-        placeholder="अपना प्रश्न लिखें... / Write your question..."
+        placeholder="Apna prashna yahan likhein..."
         style={textAreaStyle}
       />
       <div style={rowWrapStyle}>
         <label style={checkboxLabelStyle}>
           <input type="checkbox" checked={isDetailed} onChange={(e) => setIsDetailed(e.target.checked)} />
-          Detailed Answer / विस्तृत उत्तर
+          Detailed Uttar
         </label>
         <button style={buttonStyle} onClick={askQuestion} disabled={loading}>
-          {loading ? 'Generating answer... / उत्तर तैयार हो रहा है...' : 'Get Answer / उत्तर प्राप्त करें'}
+          {loading ? 'Uttar taiyaar ho raha hai...' : 'Uttar Prapt Karein'}
         </button>
       </div>
       {error ? <p style={errorStyle}>{error}</p> : null}
@@ -1594,7 +1657,7 @@ function SectionRapidGuidance({ activeModule, data, dashaPrediction }) {
       <p style={mutedStyle}>{summary}</p>
 
       <div style={sectionInnerStyle}>
-        <h3 style={smallHeadStyle}>Q&A Tatkal Uttar</h3>
+        <h3 style={smallHeadStyle}>Guru Ji ka Turant Sujhav</h3>
         <p style={textStyle}><strong>Q:</strong> {meta.question}</p>
         <p style={textStyle}><strong>A:</strong> {answerText}</p>
       </div>
@@ -1620,7 +1683,7 @@ function RemediesPage({ onLogout }) {
   const [savedData, setSavedData] = useState(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem(LATEST_KUNDLI_KEY);
+    const raw = safeGet(LATEST_KUNDLI_KEY);
     if (!raw) return;
     try {
       setSavedData(JSON.parse(raw));
@@ -1699,8 +1762,8 @@ function HistoryPage({ onLogout }) {
     try {
       const res = await apiRequest(`/history/${id}`, { method: 'GET', timeoutMs: 20000 });
       if (!res?.report) throw new Error('Report khali hai.');
-      localStorage.setItem(LATEST_KUNDLI_KEY, JSON.stringify(res.report));
-      window.location.hash = '#remedies';
+      safeSet(LATEST_KUNDLI_KEY, JSON.stringify(res.report));
+      window.location.hash = '#saved';
     } catch (e) {
       setError(`Report khul nahi paayi: ${String(e?.message || e)}`);
     } finally {
@@ -1709,6 +1772,7 @@ function HistoryPage({ onLogout }) {
   };
 
   const deleteReport = async (id) => {
+    if (!window.confirm('Ye report delete karein?')) return;
     setBusyId(id);
     setError('');
     try {
@@ -1854,11 +1918,10 @@ const deityRowStyle = {
 
 const deityImgStyle = {
   width: '46%',
-  maxWidth: 150,
-  height: 108,
-  objectFit: 'cover',
-  borderRadius: 12,
-  border: '1px solid rgba(56,189,248,0.35)'
+  maxWidth: 160,
+  height: 130,
+  objectFit: 'contain',
+  borderRadius: 12
 };
 
 const avatarWrapStyle = {
@@ -1868,12 +1931,10 @@ const avatarWrapStyle = {
 };
 
 const avatarStyle = {
-  width: 120,
-  height: 120,
+  width: 130,
+  height: 130,
   borderRadius: '50%',
-  objectFit: 'cover',
-  objectPosition: 'center top',
-  border: '2px solid rgba(34,211,238,0.7)'
+  objectFit: 'contain'
 };
 
 const titleStyle = { margin: '0 0 10px', color: '#f8fafc', fontFamily: "Calibri, 'Segoe UI', Arial, sans-serif" };
@@ -2085,13 +2146,11 @@ const loadingCardStyle = {
 };
 
 const loadingAvatarStyle = {
-  width: 118,
-  height: 118,
+  width: 130,
+  height: 130,
   borderRadius: '50%',
-  objectFit: 'cover',
-  objectPosition: 'center top',
+  objectFit: 'contain',
   marginBottom: 18,
-  border: '2px solid rgba(34,211,238,0.7)',
   animation: 'guruji-blink 2s infinite',
   cursor: 'pointer'
 };
