@@ -56,3 +56,7 @@ Thumbs.db
 *.bak
 *.bak[0-9]
 main.py.bak*
+
+# temp deity copies (could not be auto-deleted on Windows mount)
+frontend/public/_deity_*.jpg
+frontend/public/_check_transparent.png

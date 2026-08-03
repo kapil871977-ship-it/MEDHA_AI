@@ -46,8 +46,8 @@ const TEZI_MANDI_HISTORY_KEY = 'medha_tezi_mandi_history_v1';
 const LATEST_KUNDLI_KEY = 'medha_latest_kundli_response';
 
 const GURU_IMAGE_CANDIDATES = [
-  '/jagdacharya-swami-akhileshji-maharaj.jpg',
   '/jagdacharya-swami-akhileshji-maharaj.png',
+  '/jagdacharya-swami-akhileshji-maharaj.jpg',
   '/guru-ji.jpg',
   '/fortune-guru-logo.png'
 ];
@@ -540,12 +540,28 @@ function LoginPage({ onLoginSuccess }) {
       <Brand />
       <div style={loginCenterStyle}>
         <section style={{ ...cardStyle, maxWidth: 460, width: '100%' }}>
+          <div style={deityRowStyle}>
+            <img
+              src="/shiv-parivar.jpg"
+              data-fallbacks="/fortune-guru-logo.png"
+              onError={handleImageFallback}
+              alt="Shiv Parivar"
+              style={deityImgStyle}
+            />
+            <img
+              src="/lakshmi-narayan.jpg"
+              data-fallbacks="/fortune-guru-logo.png"
+              onError={handleImageFallback}
+              alt="Lakshmi Narayan"
+              style={deityImgStyle}
+            />
+          </div>
           <div style={avatarWrapStyle}>
             <img
               src={GURU_IMAGE_CANDIDATES[0]}
               data-fallbacks={GURU_IMAGE_CANDIDATES.slice(1).join('|')}
               onError={handleImageFallback}
-              alt="Jagdacharya"
+              alt="Guru Ji"
               style={avatarStyle}
             />
           </div>
@@ -814,10 +830,8 @@ function KundliPage({ onLogout }) {
   }, [formData]);
 
 
-  // Guruji avatar and voice activation UI
+  // Guru Ji avatar UI (rotating photos)
 
-  const [gurujiAudio, setGurujiAudio] = useState(null);
-  const [voiceNotice, setVoiceNotice] = useState('');
   const gurujiAvatars = [
     '/guruji/guruji1.jpeg',
     '/guruji/guruji2.jpeg',
@@ -836,47 +850,10 @@ function KundliPage({ onLogout }) {
   // Cycle avatar on click
   const handleAvatarClick = () => setAvatarIdx((i) => (i + 1) % gurujiAvatars.length);
 
-  // Play Guru Ji audio (original or cloned).
-  // The voice files may be absent or empty, and browsers also block autoplay,
-  // so every failure path is handled instead of leaving a rejected promise
-  // and a permanently "speaking" state behind.
-  const playGurujiAudio = (type) => {
-    if (gurujiAudio) {
-      gurujiAudio.pause();
-      setGurujiAudio(null);
-    }
-    setVoiceNotice('');
-
-    const src = type === 'original'
-      ? '/guruji/guruji_original.mpeg'
-      : type === 'cloned' ? '/guruji/guruji_cloned.mpeg' : '';
-    if (!src) return;
-
-    const audio = new window.Audio(src);
-    const failed = () => {
-      setGurujiAudio(null);
-      setVoiceNotice('Guru Ji ki voice file abhi uplabdh nahi hai.');
-    };
-    audio.onended = () => setGurujiAudio(null);
-    audio.onerror = failed;
-    setGurujiAudio(audio);
-
-    const played = audio.play();
-    if (played && typeof played.catch === 'function') {
-      played.catch(failed);
-    }
-  };
-
-  // Stop any playing audio when this screen goes away.
-  useEffect(() => () => { if (gurujiAudio) gurujiAudio.pause(); }, [gurujiAudio]);
-
-
   if (loading) return (
     <KundliLoadingScreen
       avatar={gurujiAvatar}
       onAvatarClick={handleAvatarClick}
-      onPlay={playGurujiAudio}
-      voiceNotice={voiceNotice}
     />
   );
 
@@ -892,12 +869,9 @@ function KundliPage({ onLogout }) {
           onClick={handleAvatarClick}
         />
         <div>{error}</div>
-        {voiceNotice ? <div style={mutedStyle}>{voiceNotice}</div> : null}
         <div style={{ marginTop: 12, display: 'flex', gap: 8, flexDirection: 'column' }}>
           <button style={secondaryButtonStyle} onClick={() => { window.location.hash = '#home'; }}>Home par wapas jayein</button>
           <button style={secondaryButtonStyle} onClick={() => window.location.reload()}>Dubara try karein</button>
-          <button style={secondaryButtonStyle} onClick={() => playGurujiAudio('original')}>Guru Ji Original Voice</button>
-          <button style={secondaryButtonStyle} onClick={() => playGurujiAudio('cloned')}>Guru Ji Cloned Voice</button>
         </div>
         <style>{`@keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }`}</style>
       </div>
@@ -1871,6 +1845,22 @@ const loginCenterStyle = {
   padding: '10px 0 40px'
 };
 
+const deityRowStyle = {
+  display: 'flex',
+  gap: 10,
+  justifyContent: 'center',
+  marginBottom: 12
+};
+
+const deityImgStyle = {
+  width: '46%',
+  maxWidth: 150,
+  height: 108,
+  objectFit: 'cover',
+  borderRadius: 12,
+  border: '1px solid rgba(56,189,248,0.35)'
+};
+
 const avatarWrapStyle = {
   display: 'flex',
   justifyContent: 'center',
@@ -2131,7 +2121,6 @@ const progressBarStyle = {
 };
 
 const loadingHintStyle = { fontSize: 13, color: '#93c5fd', marginTop: 14, lineHeight: 1.5 };
-const loadingVoiceRowStyle = { marginTop: 18, display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' };
 
 const KUNDLI_LOADING_MESSAGES = [
   'Aapke janm-vivaran se kundli banayi ja rahi hai...',
@@ -2141,7 +2130,7 @@ const KUNDLI_LOADING_MESSAGES = [
   'Antim sanket, timing aur upay jode ja rahe hain...'
 ];
 
-function KundliLoadingScreen({ avatar, onAvatarClick, onPlay, voiceNotice }) {
+function KundliLoadingScreen({ avatar, onAvatarClick }) {
   const [msgIdx, setMsgIdx] = useState(0);
 
   useEffect(() => {
@@ -2170,11 +2159,6 @@ function KundliLoadingScreen({ avatar, onAvatarClick, onPlay, voiceNotice }) {
         <div style={loadingHintStyle}>
           Ismein aam taur par 60&ndash;90 second lag sakte hain. Kripya page band na karein.
         </div>
-        <div style={loadingVoiceRowStyle}>
-          <button style={secondaryButtonStyle} onClick={() => onPlay('original')}>Guru Ji Original Voice</button>
-          <button style={secondaryButtonStyle} onClick={() => onPlay('cloned')}>Guru Ji Cloned Voice</button>
-        </div>
-        {voiceNotice ? <div style={loadingHintStyle}>{voiceNotice}</div> : null}
       </div>
       <style>{`
         @keyframes guruji-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.72; } }
