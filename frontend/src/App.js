@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
 // Safe localStorage wrappers: private-mode / disabled storage throws on access,
@@ -653,9 +653,29 @@ function LoginPage({ onLoginSuccess }) {
   );
 }
 
+// ── Time-of-birth helpers: store tob as 24h "HH:MM", edit as 12h + AM/PM ──
+function parseTob(tob) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(tob || ''));
+  if (!m) return { h12: '', min: '', ampm: 'AM' };
+  const h = parseInt(m[1], 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12;
+  if (h12 === 0) h12 = 12;
+  return { h12: String(h12), min: m[2], ampm };
+}
+function buildTob(h12, min, ampm) {
+  if (!h12 || min === '' || min === undefined || min === null) return '';
+  let h = parseInt(h12, 10) % 12;
+  if (ampm === 'PM') h += 12;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
 function HomePage({ onLogout }) {
   const [message, setMessage] = useState('');
   const [messageIsError, setMessageIsError] = useState(false);
+  const [placeSuggestions, setPlaceSuggestions] = useState([]);
+  const [placeLoading, setPlaceLoading] = useState(false);
+  const justSelectedPlace = useRef(false);
   const [formData, setFormData] = useState(() => {
     try {
       const raw = safeGet(FORM_STORAGE_KEY);
@@ -674,6 +694,32 @@ function HomePage({ onLogout }) {
       lng: null,
     };
   });
+
+  // Live place suggestions from OpenStreetMap (debounced). Selecting one also
+  // captures exact lat/lng so the reading uses precise coordinates.
+  useEffect(() => {
+    const q = String(formData.place || '').trim();
+    if (justSelectedPlace.current) { justSelectedPlace.current = false; return; }
+    if (q.length < 3) { setPlaceSuggestions([]); return; }
+    const timer = setTimeout(async () => {
+      try {
+        setPlaceLoading(true);
+        const res = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(q)}`,
+          { headers: { 'Accept-Language': 'en' } }
+        );
+        const data = await res.json();
+        setPlaceSuggestions(Array.isArray(data)
+          ? data.map((d) => ({ name: d.display_name, lat: parseFloat(d.lat), lng: parseFloat(d.lon) }))
+          : []);
+      } catch {
+        setPlaceSuggestions([]);
+      } finally {
+        setPlaceLoading(false);
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [formData.place]);
 
   const openKundliPage = () => {
     const missing = [];
@@ -729,10 +775,62 @@ function HomePage({ onLogout }) {
         <input type="date" style={inputStyle} value={formData.dob} onChange={(e) => setFormData({ ...formData, dob: e.target.value })} />
 
         <label style={labelStyle}>Janam Samay</label>
-        <input type="time" style={inputStyle} value={formData.tob} onChange={(e) => setFormData({ ...formData, tob: e.target.value })} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select
+            style={{ ...inputStyle, flex: 1 }}
+            value={parseTob(formData.tob).h12}
+            onChange={(e) => setFormData({ ...formData, tob: buildTob(e.target.value, parseTob(formData.tob).min || '00', parseTob(formData.tob).ampm) })}
+          >
+            <option value="">Ghanta</option>
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((h) => <option key={h} value={h}>{h}</option>)}
+          </select>
+          <select
+            style={{ ...inputStyle, flex: 1 }}
+            value={parseTob(formData.tob).min}
+            onChange={(e) => setFormData({ ...formData, tob: buildTob(parseTob(formData.tob).h12 || '12', e.target.value, parseTob(formData.tob).ampm) })}
+          >
+            <option value="">Minute</option>
+            {Array.from({ length: 60 }, (_, i) => i).map((m) => {
+              const mm = String(m).padStart(2, '0');
+              return <option key={mm} value={mm}>{mm}</option>;
+            })}
+          </select>
+          <select
+            style={{ ...inputStyle, flex: 1 }}
+            value={parseTob(formData.tob).ampm}
+            onChange={(e) => setFormData({ ...formData, tob: buildTob(parseTob(formData.tob).h12 || '12', parseTob(formData.tob).min || '00', e.target.value) })}
+          >
+            <option value="AM">AM</option>
+            <option value="PM">PM</option>
+          </select>
+        </div>
 
         <label style={labelStyle}>Janam Sthan</label>
-        <input style={inputStyle} value={formData.place} onChange={(e) => setFormData({ ...formData, place: e.target.value })} />
+        <input
+          style={inputStyle}
+          value={formData.place}
+          placeholder="Sheher ka naam likhein (jaise New Delhi)"
+          onChange={(e) => setFormData({ ...formData, place: e.target.value, lat: null, lng: null })}
+        />
+        {placeLoading ? <p style={mutedStyle}>Sthan dhoondh rahe hain...</p> : null}
+        {placeSuggestions.length > 0 ? (
+          <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {placeSuggestions.map((s, i) => (
+              <button
+                key={`ps-${i}`}
+                type="button"
+                style={{ ...secondaryButtonStyle, textAlign: 'left', fontSize: 13 }}
+                onClick={() => {
+                  justSelectedPlace.current = true;
+                  setFormData((f) => ({ ...f, place: s.name, lat: s.lat, lng: s.lng }));
+                  setPlaceSuggestions([]);
+                }}
+              >
+                {s.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
 
         <label style={labelStyle}>Lucky Number (1-9)</label>
         <input
